@@ -7,6 +7,7 @@ import html
 import os
 import secrets
 import hmac
+import time
 
 # =========================
 # تنظیمات
@@ -14,17 +15,150 @@ import hmac
 
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 REPORT_PASSWORD = os.environ.get("REPORT_PASSWORD", "")
-
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SECRET_KEY = os.environ.get("SUPABASE_SECRET_KEY", "")
 
 PORT = int(os.environ.get("PORT", 8080))
 
-SESSION_TOKEN = secrets.token_urlsafe(32)
+SESSION_COOKIE_NAME = "session"
+CSRF_COOKIE_NAME = "csrf_token"
+SESSION_TTL = int(os.environ.get("SESSION_TTL", 3600))
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "1") != "0"
+
+SESSIONS = {}
 
 
 # =========================
-# Supabase
+# مدیریت نشست و CSRF
+# =========================
+
+def cookie_attributes(max_age=None):
+    attributes = [
+        "Path=/",
+        "HttpOnly",
+        "SameSite=Strict"
+    ]
+
+    if COOKIE_SECURE:
+        attributes.append("Secure")
+
+    if max_age is not None:
+        attributes.append(f"Max-Age={max_age}")
+
+    return "; ".join(attributes)
+
+
+def parse_cookies(header):
+    cookies = {}
+
+    for part in (header or "").split(";"):
+        if "=" not in part:
+            continue
+
+        name, value = part.strip().split("=", 1)
+        cookies[name] = value
+
+    return cookies
+
+
+def get_session(handler):
+    cookies = parse_cookies(
+        handler.headers.get("Cookie", "")
+    )
+
+    token = cookies.get(SESSION_COOKIE_NAME)
+
+    if not token:
+        return None
+
+    session = SESSIONS.get(token)
+
+    if not session:
+        return None
+
+    if session["expires_at"] <= time.time():
+        SESSIONS.pop(token, None)
+        return None
+
+    return {
+        "token": token,
+        **session
+    }
+
+
+def create_session():
+    session_token = secrets.token_urlsafe(32)
+    csrf_token = secrets.token_urlsafe(32)
+
+    SESSIONS[session_token] = {
+        "csrf_token": csrf_token,
+        "expires_at": time.time() + SESSION_TTL
+    }
+
+    return session_token, csrf_token
+
+
+def delete_session(token):
+    if token:
+        SESSIONS.pop(token, None)
+
+
+def is_logged_in(handler):
+    return get_session(handler) is not None
+
+
+def csrf_is_valid(handler, info):
+    session = get_session(handler)
+
+    if not session:
+        return False
+
+    submitted_token = info.get(
+        "csrf_token",
+        [""]
+    )[0]
+
+    cookie_token = parse_cookies(
+        handler.headers.get("Cookie", "")
+    ).get(CSRF_COOKIE_NAME, "")
+
+    expected_token = session["csrf_token"]
+
+    return (
+        bool(submitted_token)
+        and bool(cookie_token)
+        and hmac.compare_digest(submitted_token, expected_token)
+        and hmac.compare_digest(cookie_token, expected_token)
+    )
+
+
+def csrf_field(handler):
+    session = get_session(handler)
+
+    if not session:
+        return ""
+
+    return f"""
+<input
+type="hidden"
+name="csrf_token"
+value="{html.escape(session["csrf_token"])}"
+>
+"""
+
+
+def reject_request(handler, status=403, message="درخواست غیرمجاز است."):
+    handler.send_response(status)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+    handler.wfile.write(
+        error_page(message).encode("utf-8")
+    )
+
+
+# =========================
+# اتصال به Supabase
 # =========================
 
 def supabase_request(method, url, data=None):
@@ -50,10 +184,7 @@ def supabase_request(method, url, data=None):
 
     try:
 
-        with urllib.request.urlopen(
-            request,
-            timeout=15
-        ) as response:
+        with urllib.request.urlopen(request, timeout=15) as response:
 
             text = response.read().decode("utf-8")
 
@@ -77,7 +208,7 @@ def supabase_request(method, url, data=None):
 
 
 # =========================
-# HTML
+# قالب اصلی سایت
 # =========================
 
 def page(title, content):
@@ -94,309 +225,711 @@ def page(title, content):
 <meta name="viewport"
 content="width=device-width, initial-scale=1.0">
 
+<meta name="theme-color" content="#050816">
+
 <title>{html.escape(title)}</title>
+
 
 <style>
 
+/* =========================
+   Reset
+========================= */
+
 * {{
-box-sizing:border-box;
+    box-sizing: border-box;
+}}
+
+html {{
+    scroll-behavior: smooth;
 }}
 
 body {{
 
-margin:0;
+    margin: 0;
 
-font-family:
-Tahoma,
-Arial,
-sans-serif;
+    min-height: 100vh;
 
-background:
-linear-gradient(
-135deg,
-#020617,
-#0f172a,
-#172554
-);
+    font-family:
+        Tahoma,
+        Arial,
+        sans-serif;
 
-color:white;
+    color: #ffffff;
 
-min-height:100vh;
+    background:
 
+        radial-gradient(
+            circle at 10% 20%,
+            rgba(37,99,235,.22),
+            transparent 30%
+        ),
+
+        radial-gradient(
+            circle at 90% 80%,
+            rgba(124,58,237,.22),
+            transparent 30%
+        ),
+
+        linear-gradient(
+            135deg,
+            #020617,
+            #071127,
+            #0f172a
+        );
+
+    overflow-x: hidden;
 }}
+
+
+/* =========================
+   Background
+========================= */
+
+body::before {{
+
+    content: "";
+
+    position: fixed;
+
+    width: 280px;
+    height: 280px;
+
+    border-radius: 50%;
+
+    background: rgba(59,130,246,.10);
+
+    filter: blur(70px);
+
+    top: -100px;
+    right: -80px;
+
+    pointer-events: none;
+}}
+
+body::after {{
+
+    content: "";
+
+    position: fixed;
+
+    width: 300px;
+    height: 300px;
+
+    border-radius: 50%;
+
+    background: rgba(168,85,247,.10);
+
+    filter: blur(80px);
+
+    bottom: -120px;
+    left: -100px;
+
+    pointer-events: none;
+}}
+
+
+/* =========================
+   Container
+========================= */
 
 .container {{
 
-width:94%;
+    width: 94%;
 
-max-width:900px;
+    max-width: 1050px;
 
-margin:30px auto;
+    margin: 35px auto;
 
+    position: relative;
+
+    z-index: 1;
 }}
+
+
+/* =========================
+   Card
+========================= */
 
 .card {{
 
-background:
-rgba(30,41,59,.95);
+    background:
+        linear-gradient(
+            145deg,
+            rgba(30,41,59,.92),
+            rgba(15,23,42,.94)
+        );
 
-border-radius:22px;
+    border: 1px solid rgba(255,255,255,.08);
 
-padding:24px;
+    border-radius: 28px;
 
-margin-bottom:20px;
+    padding: 30px;
 
-box-shadow:
-0 15px 40px
-rgba(0,0,0,.35);
+    margin-bottom: 22px;
+
+    box-shadow:
+        0 25px 70px rgba(0,0,0,.35),
+        inset 0 1px 0 rgba(255,255,255,.04);
+
+    backdrop-filter: blur(16px);
+
+    animation: cardIn .45s ease;
+}}
+
+@keyframes cardIn {{
+
+    from {{
+        opacity: 0;
+        transform: translateY(15px);
+    }}
+
+    to {{
+        opacity: 1;
+        transform: translateY(0);
+    }}
+}}
+
+
+/* =========================
+   Header
+========================= */
+
+.logo-box {{
+
+    width: 82px;
+    height: 82px;
+
+    margin: 0 auto 18px;
+
+    border-radius: 24px;
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content: center;
+
+    font-size: 42px;
+
+    background:
+
+        linear-gradient(
+            135deg,
+            #2563eb,
+            #7c3aed
+        );
+
+    box-shadow:
+        0 15px 35px rgba(37,99,235,.30);
 
 }}
 
 h1 {{
 
-text-align:center;
+    text-align: center;
 
-margin-bottom:25px;
+    font-size: 30px;
+
+    margin: 5px 0 10px;
 
 }}
+
+h2 {{
+
+    margin-top: 0;
+
+}}
+
+.subtitle {{
+
+    text-align: center;
+
+    color: #94a3b8;
+
+    font-size: 15px;
+
+    line-height: 1.8;
+
+    margin-bottom: 28px;
+}}
+
+
+/* =========================
+   Inputs
+========================= */
 
 input,
 textarea,
 select {{
 
-width:100%;
+    width: 100%;
 
-border:none;
+    border: 1px solid rgba(255,255,255,.08);
 
-outline:none;
+    outline: none;
 
-border-radius:13px;
+    border-radius: 16px;
 
-padding:14px;
+    padding: 15px 17px;
 
-font-size:16px;
+    font-size: 16px;
 
-background:#334155;
+    background: rgba(51,65,85,.75);
 
-color:white;
+    color: white;
 
-margin-bottom:12px;
+    margin-bottom: 13px;
 
-font-family:
-Tahoma,
-Arial,
-sans-serif;
+    font-family:
+        Tahoma,
+        Arial,
+        sans-serif;
 
+    transition: .2s;
+}}
+
+input:focus,
+textarea:focus,
+select:focus {{
+
+    border-color: #3b82f6;
+
+    box-shadow:
+        0 0 0 3px rgba(59,130,246,.15);
 }}
 
 textarea {{
 
-min-height:180px;
+    min-height: 190px;
 
-resize:vertical;
+    resize: vertical;
 
+    line-height: 1.8;
 }}
+
+input::placeholder,
+textarea::placeholder {{
+
+    color: #94a3b8;
+}}
+
+
+/* =========================
+   Buttons
+========================= */
 
 button {{
 
-width:100%;
+    width: 100%;
 
-border:none;
+    border: none;
 
-border-radius:13px;
+    border-radius: 16px;
 
-padding:14px;
+    padding: 15px;
 
-margin-top:8px;
+    margin-top: 7px;
 
-font-size:16px;
+    font-size: 16px;
 
-cursor:pointer;
+    font-weight: bold;
 
-background:#2563eb;
+    cursor: pointer;
 
-color:white;
+    color: white;
 
+    background:
+        linear-gradient(
+            135deg,
+            #2563eb,
+            #4f46e5
+        );
+
+    box-shadow:
+        0 10px 25px rgba(37,99,235,.20);
+
+    transition:
+        transform .2s,
+        box-shadow .2s,
+        filter .2s;
 }}
 
 button:hover {{
 
-background:#1d4ed8;
+    transform: translateY(-2px);
 
+    filter: brightness(1.08);
+
+    box-shadow:
+        0 15px 30px rgba(37,99,235,.28);
+}}
+
+button:active {{
+
+    transform: translateY(0);
 }}
 
 .delete {{
 
-background:#dc2626;
-
+    background:
+        linear-gradient(
+            135deg,
+            #dc2626,
+            #991b1b
+        );
 }}
 
 .status-button {{
 
-background:#16a34a;
-
+    background:
+        linear-gradient(
+            135deg,
+            #059669,
+            #047857
+        );
 }}
 
 .logout {{
 
-background:#475569;
-
+    background:
+        linear-gradient(
+            135deg,
+            #475569,
+            #334155
+        );
 }}
+
+
+/* =========================
+   Links
+========================= */
+
+.back {{
+
+    display: block;
+
+    text-align: center;
+
+    color: #93c5fd;
+
+    text-decoration: none;
+
+    margin-top: 17px;
+
+    transition: .2s;
+}}
+
+.back:hover {{
+
+    color: white;
+
+    transform: translateY(-1px);
+}}
+
+
+/* =========================
+   Feature Cards
+========================= */
+
+.features {{
+
+    display: grid;
+
+    grid-template-columns:
+        repeat(3, 1fr);
+
+    gap: 13px;
+
+    margin-top: 25px;
+}}
+
+.feature {{
+
+    padding: 18px;
+
+    border-radius: 18px;
+
+    background:
+        rgba(51,65,85,.48);
+
+    border:
+        1px solid rgba(255,255,255,.06);
+
+    text-align: center;
+}}
+
+.feature-icon {{
+
+    font-size: 27px;
+
+    margin-bottom: 7px;
+}}
+
+.feature-title {{
+
+    font-weight: bold;
+
+    margin-bottom: 5px;
+}}
+
+.feature-text {{
+
+    color: #94a3b8;
+
+    font-size: 12px;
+
+    line-height: 1.6;
+}}
+
+
+/* =========================
+   Success / Error
+========================= */
 
 .success {{
 
-background:#166534;
+    background:
+        linear-gradient(
+            135deg,
+            rgba(22,101,52,.85),
+            rgba(21,128,61,.55)
+        );
 
-padding:18px;
+    border:
+        1px solid rgba(74,222,128,.20);
 
-border-radius:14px;
+    padding: 24px;
 
-text-align:center;
+    border-radius: 20px;
 
+    text-align: center;
 }}
 
 .error {{
 
-background:#991b1b;
+    background:
+        linear-gradient(
+            135deg,
+            rgba(153,27,27,.85),
+            rgba(127,29,29,.60)
+        );
 
-padding:18px;
+    border:
+        1px solid rgba(248,113,113,.20);
 
-border-radius:14px;
+    padding: 20px;
 
-text-align:center;
+    border-radius: 18px;
 
-word-break:break-word;
+    text-align: center;
 
+    word-break: break-word;
 }}
+
+
+/* =========================
+   Report
+========================= */
 
 .report {{
 
-background:#334155;
+    background:
+        linear-gradient(
+            145deg,
+            rgba(51,65,85,.82),
+            rgba(30,41,59,.82)
+        );
 
-border-radius:17px;
+    border:
+        1px solid rgba(255,255,255,.07);
 
-padding:18px;
+    border-radius: 21px;
 
-margin-bottom:16px;
+    padding: 21px;
 
+    margin-bottom: 16px;
+
+    transition: .2s;
+}}
+
+.report:hover {{
+
+    transform: translateY(-2px);
+
+    border-color:
+        rgba(96,165,250,.25);
 }}
 
 .report-text {{
 
-white-space:pre-wrap;
+    white-space: pre-wrap;
 
-line-height:1.9;
+    line-height: 2;
 
-margin:15px 0;
+    margin: 15px 0;
 
+    color: #f8fafc;
 }}
 
 .date {{
 
-color:#cbd5e1;
+    color: #94a3b8;
 
-font-size:13px;
+    font-size: 12px;
 
+    margin-top: 10px;
 }}
+
+
+/* =========================
+   Tracking Code
+========================= */
 
 .code {{
 
-background:#0f172a;
+    background:
+        rgba(2,6,23,.75);
 
-border-radius:10px;
+    border:
+        1px solid rgba(96,165,250,.15);
 
-padding:12px;
+    border-radius: 14px;
 
-text-align:center;
+    padding: 14px;
 
-font-weight:bold;
+    text-align: center;
 
-letter-spacing:1px;
+    font-weight: bold;
 
-margin:10px 0;
+    letter-spacing: 1.5px;
 
+    margin: 13px 0;
+
+    color: #bfdbfe;
 }}
+
+
+/* =========================
+   Badge
+========================= */
 
 .badge {{
 
-display:inline-block;
+    display: inline-block;
 
-padding:7px 12px;
+    padding: 7px 13px;
 
-border-radius:20px;
+    border-radius: 999px;
 
-background:#2563eb;
+    background:
+        rgba(37,99,235,.20);
 
-margin-bottom:8px;
+    border:
+        1px solid rgba(96,165,250,.18);
 
+    color: #bfdbfe;
+
+    margin-bottom: 8px;
+
+    font-size: 13px;
 }}
 
-.back {{
 
-display:block;
-
-text-align:center;
-
-color:#93c5fd;
-
-margin-top:18px;
-
-text-decoration:none;
-
-}}
+/* =========================
+   Stats
+========================= */
 
 .stats {{
 
-display:grid;
+    display: grid;
 
-grid-template-columns:
-repeat(3,1fr);
+    grid-template-columns:
+        repeat(3, 1fr);
 
-gap:10px;
+    gap: 13px;
 
-margin-bottom:20px;
-
+    margin-bottom: 22px;
 }}
 
 .stat {{
 
-background:#334155;
+    background:
+        linear-gradient(
+            145deg,
+            rgba(51,65,85,.70),
+            rgba(30,41,59,.70)
+        );
 
-border-radius:15px;
+    border-radius: 18px;
 
-padding:15px;
+    padding: 18px;
 
-text-align:center;
+    text-align: center;
 
+    border:
+        1px solid rgba(255,255,255,.06);
 }}
 
 .stat-number {{
 
-font-size:26px;
+    font-size: 30px;
 
-font-weight:bold;
+    font-weight: bold;
 
+    margin-bottom: 5px;
+
+    color: #bfdbfe;
 }}
 
-@media(max-width:600px) {{
 
-.stats {{
+/* =========================
+   Search
+========================= */
 
-grid-template-columns:1fr;
+.search-box {{
 
+    margin-bottom: 22px;
 }}
 
-.card {{
 
-padding:18px;
+/* =========================
+   Responsive
+========================= */
 
-}}
+@media(max-width:700px) {{
 
+    .container {{
+        width: 92%;
+        margin: 20px auto;
+    }}
+
+    .card {{
+        padding: 20px;
+        border-radius: 22px;
+    }}
+
+    h1 {{
+        font-size: 25px;
+    }}
+
+    .features {{
+        grid-template-columns: 1fr;
+    }}
+
+    .stats {{
+        grid-template-columns: 1fr;
+    }}
+
+    textarea {{
+        min-height: 160px;
+    }}
 }}
 
 </style>
 
 </head>
+
 
 <body>
 
@@ -424,34 +957,102 @@ def main_page():
 
 <div class="card">
 
+<div class="logo-box">
+🛡️
+</div>
+
 <h1>
-📝 سامانه غدیر
+سامانه غدیر
 </h1>
 
-<p style="text-align:center;color:#cbd5e1;">
-سامانه ثبت و پیگیری گزارش
-</p>
+<div class="subtitle">
+
+سامانه ثبت و پیگیری گزارش‌ها
+
+<br>
+
+گزارش خود را ثبت کنید و با کد پیگیری
+وضعیت آن را مشاهده کنید.
+
+</div>
+
 
 <form method="POST" action="/report">
 
 <input
 type="password"
 name="report_password"
-placeholder="رمز ثبت گزارش"
+placeholder="🔐 رمز ثبت گزارش"
 required
 >
 
 <textarea
 name="report"
-placeholder="گزارش خود را اینجا بنویسید..."
+placeholder="✍️ گزارش خود را اینجا بنویسید..."
 required
 ></textarea>
 
 <button type="submit">
-ثبت گزارش
+🚀 ثبت گزارش
 </button>
 
 </form>
+
+
+<div class="features">
+
+<div class="feature">
+
+<div class="feature-icon">
+🔐
+</div>
+
+<div class="feature-title">
+محافظت‌شده
+</div>
+
+<div class="feature-text">
+ثبت گزارش با رمز ورود
+</div>
+
+</div>
+
+
+<div class="feature">
+
+<div class="feature-icon">
+🎫
+</div>
+
+<div class="feature-title">
+کد پیگیری
+</div>
+
+<div class="feature-text">
+هر گزارش دارای کد اختصاصی
+</div>
+
+</div>
+
+
+<div class="feature">
+
+<div class="feature-icon">
+🔎
+</div>
+
+<div class="feature-title">
+پیگیری آنلاین
+</div>
+
+<div class="feature-text">
+مشاهده وضعیت گزارش
+</div>
+
+</div>
+
+</div>
+
 
 <a class="back" href="/track">
 🔎 پیگیری گزارش
@@ -468,45 +1069,58 @@ required
 
 
 # =========================
-# موفقیت
+# صفحه موفقیت
 # =========================
 
 def success_page(code):
 
     return page(
-        "ثبت موفق",
+        "گزارش ثبت شد",
         f"""
 
 <div class="card">
 
 <div class="success">
 
+<div style="font-size:50px;">
+✅
+</div>
+
 <h2>
-✅ گزارش ثبت شد
+گزارش با موفقیت ثبت شد
 </h2>
 
 <p>
-گزارش شما با موفقیت ذخیره شد.
+گزارش شما ذخیره شد.
 </p>
+
 
 <div class="code">
 
-کد پیگیری:
+کد پیگیری
 
-<br>
+<br><br>
 
+<span style="font-size:22px;">
 {html.escape(code)}
+</span>
 
 </div>
 
-<p>
-این کد را برای پیگیری نگه دارید.
+
+<p style="color:#bbf7d0;">
+این کد را برای پیگیری گزارش نگه دارید.
 </p>
 
 </div>
 
+
+<a class="back" href="/track">
+🔎 پیگیری گزارش
+</a>
+
 <a class="back" href="/">
-بازگشت به صفحه اصلی
+🏠 بازگشت به صفحه اصلی
 </a>
 
 </div>
@@ -516,7 +1130,7 @@ def success_page(code):
 
 
 # =========================
-# خطا
+# صفحه خطا
 # =========================
 
 def error_page(error_text):
@@ -529,8 +1143,12 @@ def error_page(error_text):
 
 <div class="error">
 
+<div style="font-size:45px;">
+❌
+</div>
+
 <h2>
-❌ عملیات ناموفق بود
+عملیات ناموفق بود
 </h2>
 
 <p>
@@ -539,8 +1157,9 @@ def error_page(error_text):
 
 </div>
 
+
 <a class="back" href="/">
-بازگشت
+🏠 بازگشت
 </a>
 
 </div>
@@ -550,7 +1169,7 @@ def error_page(error_text):
 
 
 # =========================
-# ورود مدیریت
+# صفحه ورود مدیریت
 # =========================
 
 def admin_login_page():
@@ -561,27 +1180,37 @@ def admin_login_page():
 
 <div class="card">
 
+<div class="logo-box">
+🔐
+</div>
+
 <h1>
-🔐 ورود مدیریت
+ورود مدیریت
 </h1>
+
+<div class="subtitle">
+برای ورود به پنل مدیریت رمز خود را وارد کنید.
+</div>
+
 
 <form method="POST" action="/login">
 
 <input
 type="password"
 name="password"
-placeholder="رمز مدیریت"
+placeholder="🔑 رمز مدیریت"
 required
 >
 
 <button type="submit">
-ورود
+🚪 ورود به پنل
 </button>
 
 </form>
 
+
 <a class="back" href="/">
-بازگشت
+🏠 بازگشت
 </a>
 
 </div>
@@ -591,40 +1220,32 @@ required
 
 
 # =========================
-# بررسی ورود
+# پنل گزارش‌ها
 # =========================
 
-def is_logged_in(handler):
-
-    cookie = handler.headers.get(
-        "Cookie",
-        ""
-    )
-
-    return cookie == (
-        "session=" + SESSION_TOKEN
-    )
-
-
-# =========================
-# پنل مدیریت
-# =========================
-
-def reports_page(search=""):
+def reports_page(search="", csrf_token=""):
 
     url = (
+
         SUPABASE_URL
+
         + "/rest/v1/reports"
+
         + "?select=id,created_at,report,tracking_code,status"
+
         + "&order=created_at.desc"
+
     )
+
 
     reports = supabase_request(
         "GET",
         url
     )
 
+
     search = search.strip().lower()
+
 
     if search:
 
@@ -634,49 +1255,113 @@ def reports_page(search=""):
 
             for item in reports
 
-            if search in str(
-                item.get("report", "")
+            if
+
+            search in str(
+                item.get(
+                    "report",
+                    ""
+                )
             ).lower()
 
-            or search in str(
-                item.get("tracking_code", "")
+            or
+
+            search in str(
+                item.get(
+                    "tracking_code",
+                    ""
+                )
             ).lower()
 
-            or search in str(
-                item.get("status", "")
+            or
+
+            search in str(
+                item.get(
+                    "status",
+                    ""
+                )
             ).lower()
 
         ]
 
+
     total = len(reports)
 
+
     new_count = sum(
+
         1
+
         for x in reports
-        if x.get("status", "جدید") == "جدید"
+
+        if x.get(
+            "status",
+            "جدید"
+        ) == "جدید"
+
     )
+
+
+    checking_count = sum(
+
+        1
+
+        for x in reports
+
+        if x.get(
+            "status",
+            ""
+        ) == "در حال بررسی"
+
+    )
+
 
     checked_count = sum(
+
         1
+
         for x in reports
-        if x.get("status", "") == "بررسی‌شده"
+
+        if x.get(
+            "status",
+            ""
+        ) == "بررسی‌شده"
+
     )
 
+
     reports_html = ""
+
 
     for item in reports:
 
         report_id = str(
-            item.get("id", "")
+            item.get(
+                "id",
+                ""
+            )
         )
+
 
         report_text = html.escape(
-            str(item.get("report", ""))
+            str(
+                item.get(
+                    "report",
+                    ""
+                )
+            )
         )
 
+
         created_at = html.escape(
-            str(item.get("created_at", ""))
+            str(
+                item.get(
+                    "created_at",
+                    ""
+                )
+            )
         )
+
 
         tracking_code = html.escape(
             str(
@@ -687,12 +1372,14 @@ def reports_page(search=""):
             )
         )
 
+
         if not tracking_code:
 
             tracking_code = (
                 "GHD-"
                 + report_id
             )
+
 
         status = html.escape(
             str(
@@ -703,38 +1390,40 @@ def reports_page(search=""):
             )
         )
 
+
         reports_html += f"""
 
 <div class="report">
 
 <div class="badge">
-
-وضعیت:
-{status}
-
+📌 وضعیت: {status}
 </div>
+
 
 <div class="code">
 
-کد پیگیری:
+🎫 کد پیگیری
+
+<br>
 
 {tracking_code}
 
 </div>
 
+
 <div class="report-text">
-
 {report_text}
-
 </div>
+
 
 <div class="date">
 
-زمان ثبت:
+🕐 زمان ثبت:
 
 {created_at}
 
 </div>
+
 
 <form
 method="POST"
@@ -746,6 +1435,13 @@ type="hidden"
 name="id"
 value="{html.escape(report_id)}"
 >
+
+<input
+type="hidden"
+name="csrf_token"
+value="{html.escape(csrf_token)}"
+>
+
 
 <select name="status">
 
@@ -763,6 +1459,7 @@ value="{html.escape(report_id)}"
 
 </select>
 
+
 <button
 class="status-button"
 type="submit"
@@ -774,6 +1471,7 @@ type="submit"
 
 </form>
 
+
 <form
 method="POST"
 action="/delete"
@@ -784,6 +1482,13 @@ type="hidden"
 name="id"
 value="{html.escape(report_id)}"
 >
+
+<input
+type="hidden"
+name="csrf_token"
+value="{html.escape(csrf_token)}"
+>
+
 
 <button
 class="delete"
@@ -800,689 +1505,10 @@ type="submit"
 
 """
 
+
     if not reports_html:
 
         reports_html = """
 
-<div class="card">
-
-هنوز گزارشی پیدا نشد.
-
-</div>
-
-"""
-
-    return page(
-        "پنل مدیریت",
-        f"""
-
-<div class="card">
-
-<h1>
-📋 پنل مدیریت سامانه غدیر
-</h1>
-
-<div class="stats">
-
-<div class="stat">
-
-<div class="stat-number">
-{total}
-</div>
-
-کل گزارش‌ها
-
-</div>
-
-<div class="stat">
-
-<div class="stat-number">
-{new_count}
-</div>
-
-گزارش جدید
-
-</div>
-
-<div class="stat">
-
-<div class="stat-number">
-{checked_count}
-</div>
-
-بررسی‌شده
-
-</div>
-
-</div>
-
-<form
-method="GET"
-action="/reports"
->
-
-<input
-type="text"
-name="search"
-value="{html.escape(search)}"
-placeholder="🔎 جست‌وجو..."
->
-
-<button type="submit">
-جست‌وجو
-</button>
-
-</form>
-
-{reports_html}
-
-<form
-method="POST"
-action="/logout"
->
-
-<button
-class="logout"
-type="submit"
->
-
-🚪 خروج
-
-</button>
-
-</form>
-
-<a class="back" href="/">
-بازگشت
-</a>
-
-</div>
-
-"""
-    )
-
-
-# =========================
-# پیگیری
-# =========================
-
-def track_page(message=""):
-
-    message_html = ""
-
-    if message:
-
-        message_html = f"""
-
-<div class="error">
-
-{html.escape(message)}
-
-</div>
-
-"""
-
-    return page(
-        "پیگیری گزارش",
-        f"""
-
-<div class="card">
-
-<h1>
-🔎 پیگیری گزارش
-</h1>
-
-{message_html}
-
-<form
-method="GET"
-action="/track"
->
-
-<input
-type="text"
-name="code"
-placeholder="مثلاً GHD-A1B2C3D4"
-required
->
-
-<button type="submit">
-پیگیری
-</button>
-
-</form>
-
-<a class="back" href="/">
-بازگشت
-</a>
-
-</div>
-
-"""
-    )
-
-
-# =========================
-# نتیجه پیگیری
-# =========================
-
-def track_result(code):
-
-    encoded_code = quote(
-        code,
-        safe=""
-    )
-
-    url = (
-        SUPABASE_URL
-        + "/rest/v1/reports"
-        + "?select=created_at,status,tracking_code"
-        + "&tracking_code=eq."
-        + encoded_code
-    )
-
-    reports = supabase_request(
-        "GET",
-        url
-    )
-
-    if not reports:
-
-        return track_page(
-            "گزارشی با این کد پیدا نشد."
-        )
-
-    item = reports[0]
-
-    status = html.escape(
-        str(
-            item.get(
-                "status",
-                "جدید"
-            )
-        )
-    )
-
-    created = html.escape(
-        str(
-            item.get(
-                "created_at",
-                ""
-            )
-        )
-    )
-
-    return page(
-        "نتیجه پیگیری",
-        f"""
-
-<div class="card">
-
-<h1>
-📄 نتیجه پیگیری
-</h1>
-
-<div class="code">
-
-{html.escape(code)}
-
-</div>
-
-<div class="badge">
-
-وضعیت:
-{status}
-
-</div>
-
-<p>
-
-زمان ثبت:
-
-{created}
-
-</p>
-
-<a class="back" href="/track">
-پیگیری دوباره
-</a>
-
-<a class="back" href="/">
-صفحه اصلی
-</a>
-
-</div>
-
-"""
-    )
-
-
-# =========================
-# سرور
-# =========================
-
-class Server(
-    BaseHTTPRequestHandler
-):
-
-    def do_GET(self):
-
-        parsed = urlparse(
-            self.path
-        )
-
-        path = parsed.path
-
-        query = parse_qs(
-            parsed.query
-        )
-
-        if path == "/":
-
-            self.send_html(
-                main_page()
-            )
-
-            return
-
-        if path == "/admin":
-
-            self.send_html(
-                admin_login_page()
-            )
-
-            return
-
-        if path == "/reports":
-
-            if not is_logged_in(self):
-
-                self.send_response(403)
-
-                self.end_headers()
-
-                return
-
-            try:
-
-                search = query.get(
-                    "search",
-                    [""]
-                )[0]
-
-                self.send_html(
-                    reports_page(search)
-                )
-
-            except Exception as e:
-
-                self.send_html(
-                    error_page(e)
-                )
-
-            return
-
-        if path == "/track":
-
-            code = query.get(
-                "code",
-                [""]
-            )[0].strip()
-
-            try:
-
-                if code:
-
-                    self.send_html(
-                        track_result(code)
-                    )
-
-                else:
-
-                    self.send_html(
-                        track_page()
-                    )
-
-            except Exception as e:
-
-                self.send_html(
-                    error_page(e)
-                )
-
-            return
-
-        self.send_response(404)
-
-        self.end_headers()
-
-
-    def do_POST(self):
-
-        length = int(
-            self.headers.get(
-                "Content-Length",
-                0
-            )
-        )
-
-        data = self.rfile.read(
-            length
-        ).decode(
-            "utf-8"
-        )
-
-        info = parse_qs(
-            data
-        )
-
-
-        # =====================
-        # ثبت گزارش
-        # =====================
-
-        if self.path == "/report":
-
-            report_password = info.get(
-                "report_password",
-                [""]
-            )[0]
-
-            if not REPORT_PASSWORD:
-
-                self.send_html(
-                    error_page(
-                        "REPORT_PASSWORD تنظیم نشده."
-                    )
-                )
-
-                return
-
-            if not hmac.compare_digest(
-                report_password,
-                REPORT_PASSWORD
-            ):
-
-                self.send_html(
-                    error_page(
-                        "رمز ثبت گزارش اشتباه است."
-                    )
-                )
-
-                return
-
-            report = info.get(
-                "report",
-                [""]
-            )[0].strip()
-
-            if not report:
-
-                self.send_html(
-                    error_page(
-                        "متن گزارش خالی است."
-                    )
-                )
-
-                return
-
-            try:
-
-                tracking_code = (
-                    "GHD-"
-                    + secrets.token_hex(
-                        4
-                    ).upper()
-                )
-
-                supabase_request(
-                    "POST",
-                    SUPABASE_URL
-                    + "/rest/v1/reports",
-                    {
-                        "report": report,
-                        "tracking_code":
-                            tracking_code,
-                        "status":
-                            "جدید"
-                    }
-                )
-
-                self.send_html(
-                    success_page(
-                        tracking_code
-                    )
-                )
-
-            except Exception as e:
-
-                print(
-                    "REPORT ERROR:",
-                    repr(e)
-                )
-
-                self.send_html(
-                    error_page(e)
-                )
-
-            return
-
-
-        # =====================
-        # ورود
-        # =====================
-
-        if self.path == "/login":
-
-            password = info.get(
-                "password",
-                [""]
-            )[0]
-
-            if hmac.compare_digest(
-                password,
-                ADMIN_PASSWORD
-            ):
-
-                self.send_response(302)
-
-                self.send_header(
-                    "Location",
-                    "/reports"
-                )
-
-                self.send_header(
-                    "Set-Cookie",
-                    "session="
-                    + SESSION_TOKEN
-                    + "; HttpOnly; Secure; SameSite=Strict"
-                )
-
-                self.end_headers()
-
-            else:
-
-                self.send_html(
-                    error_page(
-                        "رمز مدیریت اشتباه است."
-                    )
-                )
-
-            return
-
-
-        # =====================
-        # تغییر وضعیت
-        # =====================
-
-        if self.path == "/status":
-
-            if not is_logged_in(self):
-
-                self.send_response(403)
-
-                self.end_headers()
-
-                return
-
-            report_id = info.get(
-                "id",
-                [""]
-            )[0]
-
-            status = info.get(
-                "status",
-                ["جدید"]
-            )[0]
-
-            allowed = [
-                "جدید",
-                "در حال بررسی",
-                "بررسی‌شده"
-            ]
-
-            if (
-                not report_id.isdigit()
-                or status not in allowed
-            ):
-
-                self.send_html(
-                    error_page(
-                        "اطلاعات نامعتبر است."
-                    )
-                )
-
-                return
-
-            try:
-
-                supabase_request(
-                    "PATCH",
-                    SUPABASE_URL
-                    + "/rest/v1/reports"
-                    + "?id=eq."
-                    + report_id,
-                    {
-                        "status": status
-                    }
-                )
-
-                self.send_response(302)
-
-                self.send_header(
-                    "Location",
-                    "/reports"
-                )
-
-                self.end_headers()
-
-            except Exception as e:
-
-                self.send_html(
-                    error_page(e)
-                )
-
-            return
-
-
-        # =====================
-        # حذف
-        # =====================
-
-        if self.path == "/delete":
-
-            if not is_logged_in(self):
-
-                self.send_response(403)
-
-                self.end_headers()
-
-                return
-
-            report_id = info.get(
-                "id",
-                [""]
-            )[0]
-
-            if not report_id.isdigit():
-
-                self.send_html(
-                    error_page(
-                        "شناسه نامعتبر است."
-                    )
-                )
-
-                return
-
-            try:
-
-                supabase_request(
-                    "DELETE",
-                    SUPABASE_URL
-                    + "/rest/v1/reports"
-                    + "?id=eq."
-                    + report_id
-                )
-
-                self.send_response(302)
-
-                self.send_header(
-                    "Location",
-                    "/reports"
-                )
-
-                self.end_headers()
-
-            except Exception as e:
-
-                self.send_html(
-                    error_page(e)
-                )
-
-            return
-
-
-        # =====================
-        # خروج
-        # =====================
-
-        if self.path == "/logout":
-
-            self.send_response(302)
-
-            self.send_header(
-                "Location",
-                "/"
-            )
-
-            self.send_header(
-                "Set-Cookie",
-                "session=deleted; "
-                "HttpOnly; "
-                "Secure; "
-                "SameSite=Strict; "
-                "Max-Age=0"
-            )
-
-            self.end_headers()
-
-            return
-
-        self.send_response(404)
-
-        self.end_headers()
-
-
-    def send_html(self, content):
-
-        self.send_response(200)
-
-        self.send_header(
-            "Content-Type",
-            "text/html; charset=utf-8"
-        )
-
-        self.end_headers()
-
-        self.wfile.write(
-            content.encode("utf-8")
-   
+<div class="card"
+style="text-align:center;color:#94a
