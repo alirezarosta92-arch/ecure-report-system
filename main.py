@@ -1,20 +1,21 @@
-
 import os
 import json
+import html
 import secrets
 import hashlib
 import hmac
+import re
 import time
-import urllib.request
-import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from http import cookies
-from datetime import datetime, timezone
+from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
-# =========================================================
-# CONFIG
-# =========================================================
+# =========================
+# SETTINGS
+# =========================
 
+HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", "10000"))
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
@@ -23,238 +24,145 @@ SUPABASE_KEY = os.environ.get("SUPABASE_SECRET_KEY", "")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 REPORT_PASSWORD = os.environ.get("REPORT_PASSWORD", "")
 
-# Session lifetime: 2 hours
-SESSION_TTL = 60 * 60 * 2
-
-# Login protection
-MAX_LOGIN_ATTEMPTS = 5
-LOGIN_WINDOW = 10 * 60
-LOCK_TIME = 15 * 60
-
-# Request limits
+SESSION_TTL = 2 * 60 * 60
 MAX_REPORT_LENGTH = 10000
-MAX_TRACKING_LENGTH = 50
 
-# In-memory security stores
 SESSIONS = {}
 LOGIN_ATTEMPTS = {}
 
-# =========================================================
+# =========================
 # SECURITY HELPERS
-# =========================================================
+# =========================
 
 def now():
     return time.time()
 
 
-def client_ip(handler):
-    # Do not blindly trust X-Forwarded-For.
-    # Render sits behind a proxy, but this remains only an
-    # approximate identifier for rate limiting.
-    forwarded = handler.headers.get("X-Forwarded-For", "")
-
-    if forwarded:
-        return forwarded.split(",")[0].strip()[:100]
-
-    return handler.client_address[0]
-
-
-def secure_compare(a, b):
-    if not isinstance(a, str):
-        a = str(a)
-
-    if not isinstance(b, str):
-        b = str(b)
-
-    return hmac.compare_digest(
-        a.encode("utf-8"),
-        b.encode("utf-8")
-    )
-
-
-def password_ok(received, expected):
-    if not received or not expected:
-        return False
-
-    return secure_compare(received, expected)
-
-
-def cleanup_sessions():
+def clean_sessions():
     current = now()
 
-    expired = []
-
-    for token, session in SESSIONS.items():
-        if current - session["created"] > SESSION_TTL:
-            expired.append(token)
+    expired = [
+        token
+        for token, data in SESSIONS.items()
+        if data["expires"] < current
+    ]
 
     for token in expired:
         SESSIONS.pop(token, None)
 
 
 def create_session():
-    cleanup_sessions()
+    clean_sessions()
 
     token = secrets.token_urlsafe(48)
     csrf = secrets.token_urlsafe(32)
 
     SESSIONS[token] = {
-        "csrf": csrf,
-        "created": now()
+        "expires": now() + SESSION_TTL,
+        "csrf": csrf
     }
 
     return token, csrf
 
 
-def destroy_session(token):
-    if token:
-        SESSIONS.pop(token, None)
-
-
-def get_cookie(handler, name):
-    raw = handler.headers.get("Cookie")
-
-    if not raw:
-        return None
-
-    jar = cookies.SimpleCookie()
-
-    try:
-        jar.load(raw)
-
-        if name in jar:
-            return jar[name].value
-
-    except Exception:
-        pass
-
-    return None
-
-
 def get_session(handler):
-    cleanup_sessions()
+    clean_sessions()
 
-    token = get_cookie(
-        handler,
-        "ghd_session"
-    )
+    cookie = handler.headers.get("Cookie", "")
 
-    if not token:
-        return None
+    for item in cookie.split(";"):
+        item = item.strip()
 
-    session = SESSIONS.get(token)
+        if item.startswith("session="):
+            token = item.split("=", 1)[1]
 
-    if not session:
-        return None
+            session = SESSIONS.get(token)
 
-    if now() - session["created"] > SESSION_TTL:
-        destroy_session(token)
-        return None
+            if session and session["expires"] > now():
+                return token, session
 
-    return session
+    return None, None
 
 
 def is_logged_in(handler):
-    return get_session(handler) is not None
+    token, session = get_session(handler)
+    return token is not None and session is not None
 
 
-def valid_csrf(handler, supplied):
-    session = get_session(handler)
-
-    if not session:
-        return False
-
-    if not supplied:
-        return False
-
-    return secure_compare(
-        supplied,
-        session["csrf"]
-    )
-
-
-# =========================================================
-# RATE LIMITING
-# =========================================================
-
-def login_allowed(ip):
+def check_login_limit(ip):
     current = now()
 
-    info = LOGIN_ATTEMPTS.get(ip)
+    data = LOGIN_ATTEMPTS.get(ip)
 
-    if not info:
+    if not data:
         return True
 
-    if current < info["locked_until"]:
-        return False
-
-    if current - info["first_attempt"] > LOGIN_WINDOW:
+    if current > data["reset"]:
         LOGIN_ATTEMPTS.pop(ip, None)
         return True
 
-    return info["attempts"] < MAX_LOGIN_ATTEMPTS
+    return data["count"] < 5
 
 
-def login_failed(ip):
+def failed_login(ip):
     current = now()
 
-    info = LOGIN_ATTEMPTS.get(ip)
+    data = LOGIN_ATTEMPTS.get(ip)
 
-    if not info:
+    if not data or current > data["reset"]:
         LOGIN_ATTEMPTS[ip] = {
-            "attempts": 1,
-            "first_attempt": current,
-            "locked_until": 0
+            "count": 1,
+            "reset": current + 600
         }
-        return
-
-    if current - info["first_attempt"] > LOGIN_WINDOW:
-        LOGIN_ATTEMPTS[ip] = {
-            "attempts": 1,
-            "first_attempt": current,
-            "locked_until": 0
-        }
-        return
-
-    info["attempts"] += 1
-
-    if info["attempts"] >= MAX_LOGIN_ATTEMPTS:
-        info["locked_until"] = current + LOCK_TIME
+    else:
+        data["count"] += 1
 
 
-def login_success(ip):
-    LOGIN_ATTEMPTS.pop(ip, None)
+def password_ok(given, real):
+    if not given or not real:
+        return False
+
+    return hmac.compare_digest(given, real)
 
 
-# =========================================================
+def safe_text(value):
+    return html.escape(str(value or ""))
+
+
+def tracking_code():
+    return "GHD-" + secrets.token_hex(5).upper()
+
+
+def valid_tracking(code):
+    return bool(re.fullmatch(r"GHD-[A-F0-9]{10}", code or ""))
+
+
+# =========================
 # SUPABASE
-# =========================================================
+# =========================
 
-def supabase_request(method, path, data=None):
-
+def supabase_request(method, path, payload=None, params=""):
     if not SUPABASE_URL or not SUPABASE_KEY:
-        print("Supabase configuration missing")
-        return None
+        raise RuntimeError("Supabase is not configured")
 
     url = SUPABASE_URL + path
+
+    if params:
+        url += "?" + params
 
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": "Bearer " + SUPABASE_KEY,
         "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Prefer": "return=representation"
+        "Accept": "application/json"
     }
 
     body = None
 
-    if data is not None:
-        body = json.dumps(
-            data,
-            ensure_ascii=False
-        ).encode("utf-8")
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
 
-    request = urllib.request.Request(
+    request = Request(
         url,
         data=body,
         headers=headers,
@@ -262,1042 +170,844 @@ def supabase_request(method, path, data=None):
     )
 
     try:
-
-        with urllib.request.urlopen(
-            request,
-            timeout=15
-        ) as response:
-
-            raw = response.read().decode(
-                "utf-8",
-                errors="replace"
-            )
+        with urlopen(request, timeout=15) as response:
+            raw = response.read()
 
             if not raw:
                 return []
 
-            try:
-                return json.loads(raw)
+            return json.loads(raw.decode("utf-8"))
 
-            except Exception:
-                return raw
+    except HTTPError as e:
+        raise RuntimeError("Database request failed")
 
-    except Exception as e:
+    except URLError:
+        raise RuntimeError("Database connection failed")
 
-        print(
-            "Supabase request failed:",
-            type(e).__name__
+
+def create_report(text):
+    code = tracking_code()
+
+    data = {
+        "report": text,
+        "tracking_code": code,
+        "status": "جدید"
+    }
+
+    result = supabase_request(
+        "POST",
+        "/rest/v1/reports",
+        data,
+        "select=id,created_at,tracking_code,status"
+    )
+
+    if not result:
+        return code
+
+    return result[0].get("tracking_code", code)
+
+
+def get_reports():
+    return supabase_request(
+        "GET",
+        "/rest/v1/reports",
+        params="select=id,created_at,report,tracking_code,status&order=id.desc"
+    )
+
+
+def get_report_by_code(code):
+    result = supabase_request(
+        "GET",
+        "/rest/v1/reports",
+        params=(
+            "select=id,created_at,tracking_code,status"
+            "&tracking_code=eq." + code
         )
-
-        return None
-
-
-# =========================================================
-# GENERAL HELPERS
-# =========================================================
-
-def escape(text):
-
-    if text is None:
-        return ""
-
-    return (
-        str(text)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-        .replace("'", "&#039;")
     )
 
+    return result[0] if result else None
 
-def generate_tracking_code():
 
-    return (
-        "GHD-"
-        + secrets.token_hex(5).upper()
+def update_status(report_id, status):
+    allowed = {
+        "جدید",
+        "در حال بررسی",
+        "بررسی شد",
+        "بسته شد"
+    }
+
+    if status not in allowed:
+        return False
+
+    supabase_request(
+        "PATCH",
+        "/rest/v1/reports",
+        {"status": status},
+        "id=eq." + str(int(report_id))
     )
-
-
-def valid_tracking_code(code):
-
-    if not code:
-        return False
-
-    if len(code) > MAX_TRACKING_LENGTH:
-        return False
-
-    allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
-
-    return all(
-        char in allowed
-        for char in code
-    )
-
-
-def valid_report(report):
-
-    if not report:
-        return False
-
-    if len(report) > MAX_REPORT_LENGTH:
-        return False
 
     return True
 
 
-# =========================================================
-# SECURITY HEADERS
-# =========================================================
-
-SECURITY_HEADERS = [
-
-    (
-        "X-Content-Type-Options",
-        "nosniff"
-    ),
-
-    (
-        "X-Frame-Options",
-        "DENY"
-    ),
-
-    (
-        "Referrer-Policy",
-        "no-referrer"
-    ),
-
-    (
-        "Permissions-Policy",
-        "camera=(), microphone=(), geolocation=()"
-    ),
-
-    (
-        "Cross-Origin-Opener-Policy",
-        "same-origin"
-    ),
-
-    (
-        "Content-Security-Policy",
-        "default-src 'self'; "
-        "style-src 'self' 'unsafe-inline'; "
-        "script-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data:; "
-        "connect-src 'self'; "
-        "frame-ancestors 'none'; "
-        "base-uri 'self'; "
-        "form-action 'self'"
-    ),
-
-    (
-        "Strict-Transport-Security",
-        "max-age=31536000; includeSubDomains"
+def delete_report(report_id):
+    supabase_request(
+        "DELETE",
+        "/rest/v1/reports",
+        params="id=eq." + str(int(report_id))
     )
-]
 
 
-# =========================================================
-# CSS
-# =========================================================
+# =========================
+# HTML
+# =========================
 
-CSS = r"""
+CSS = """
 * {
     box-sizing: border-box;
 }
 
-:root {
-    --bg:#050713;
-    --panel:rgba(15,21,43,.78);
-    --line:rgba(255,255,255,.09);
-    --text:#f7f8ff;
-    --muted:#9ba4c7;
-    --blue:#5b7cff;
-    --purple:#a45cff;
-    --cyan:#43ddff;
-    --green:#34d399;
-    --yellow:#fbbf24;
-    --red:#fb7185;
-}
-
-html {
-    scroll-behavior:smooth;
-}
-
 body {
-    margin:0;
-    min-height:100vh;
-
-    font-family:
-        Tahoma,
-        "Segoe UI",
-        Arial,
-        sans-serif;
-
-    color:var(--text);
-
+    margin: 0;
+    font-family: Tahoma, Arial, sans-serif;
     background:
-        radial-gradient(
-            circle at 10% 10%,
-            rgba(91,124,255,.22),
-            transparent 32%
-        ),
-        radial-gradient(
-            circle at 90% 15%,
-            rgba(164,92,255,.18),
-            transparent 30%
-        ),
-        radial-gradient(
-            circle at 50% 100%,
-            rgba(67,221,255,.08),
-            transparent 35%
-        ),
-        var(--bg);
-
-    overflow-x:hidden;
-}
-
-body:before {
-    content:"";
-
-    position:fixed;
-    inset:0;
-
-    pointer-events:none;
-
-    background-image:
-        linear-gradient(
-            rgba(255,255,255,.025) 1px,
-            transparent 1px
-        ),
-        linear-gradient(
-            90deg,
-            rgba(255,255,255,.025) 1px,
-            transparent 1px
-        );
-
-    background-size:45px 45px;
-}
-
-a {
-    color:inherit;
-    text-decoration:none;
-}
-
-button,
-input,
-textarea,
-select {
-    font:inherit;
-}
-
-button {
-    cursor:pointer;
+        radial-gradient(circle at top left, #172554, transparent 35%),
+        radial-gradient(circle at bottom right, #312e81, transparent 35%),
+        #050816;
+    color: #fff;
+    min-height: 100vh;
 }
 
 .container {
-    width:min(1180px,calc(100% - 32px));
-    margin:auto;
+    width: min(1050px, 92%);
+    margin: auto;
 }
 
-.nav {
-    position:sticky;
-    top:0;
-    z-index:100;
-
-    backdrop-filter:blur(22px);
-    -webkit-backdrop-filter:blur(22px);
-
-    background:rgba(5,7,19,.72);
-
-    border-bottom:1px solid var(--line);
-}
-
-.nav-inner {
-    max-width:1180px;
-    margin:auto;
-
-    padding:17px 18px;
-
-    display:flex;
-    align-items:center;
-    justify-content:space-between;
-}
-
-.brand {
-    display:flex;
-    align-items:center;
-    gap:12px;
-
-    font-size:19px;
-    font-weight:900;
+nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 22px 0;
 }
 
 .logo {
-    width:44px;
-    height:44px;
-
-    display:grid;
-    place-items:center;
-
-    border-radius:14px;
-
-    background:
-        linear-gradient(
-            135deg,
-            var(--blue),
-            var(--purple)
-        );
-
-    box-shadow:
-        0 0 30px rgba(91,124,255,.38);
+    font-size: 24px;
+    font-weight: bold;
 }
 
-.logo svg {
-    width:25px;
-    height:25px;
+.logo span {
+    color: #60a5fa;
 }
 
-.nav-links {
-    display:flex;
-    gap:6px;
-}
-
-.nav-link {
-    padding:10px 13px;
-    border-radius:12px;
-
-    color:var(--muted);
-
-    transition:.2s;
-}
-
-.nav-link:hover {
-    color:white;
-    background:rgba(255,255,255,.06);
+.card {
+    background: rgba(15, 23, 42, .78);
+    border: 1px solid rgba(96, 165, 250, .22);
+    border-radius: 24px;
+    padding: 28px;
+    margin: 25px 0;
+    box-shadow: 0 20px 70px rgba(0,0,0,.35);
+    backdrop-filter: blur(15px);
 }
 
 .hero {
-    min-height:640px;
-
-    display:flex;
-    align-items:center;
-
-    padding:75px 0;
+    text-align: center;
+    padding: 65px 20px 35px;
 }
 
-.hero-grid {
-    display:grid;
-    grid-template-columns:1.15fr .85fr;
-
-    align-items:center;
-
-    gap:60px;
+.shield {
+    width: 95px;
+    height: 95px;
+    margin: auto;
+    border-radius: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #2563eb, #7c3aed);
+    font-size: 45px;
+    box-shadow: 0 0 50px rgba(59,130,246,.45);
 }
 
-.badge {
-    display:inline-flex;
-    align-items:center;
-    gap:8px;
-
-    padding:8px 13px;
-
-    border:1px solid rgba(91,124,255,.3);
-    border-radius:999px;
-
-    background:rgba(91,124,255,.08);
-
-    color:#ccd5ff;
-
-    font-size:13px;
-    font-weight:800;
+h1 {
+    font-size: 42px;
+    margin: 25px 0 10px;
 }
 
-.badge-dot {
-    width:7px;
-    height:7px;
-
-    border-radius:50%;
-
-    background:var(--cyan);
-
-    box-shadow:
-        0 0 12px var(--cyan);
+h2 {
+    margin-top: 0;
 }
 
-.hero h1 {
-    margin:23px 0 18px;
-
-    font-size:clamp(48px,7vw,86px);
-
-    line-height:.98;
-
-    letter-spacing:-4px;
+.subtitle {
+    color: #a5b4fc;
+    line-height: 1.9;
 }
 
-.gradient-text {
-    background:
-        linear-gradient(
-            90deg,
-            white,
-            #9eb1ff,
-            #ca8cff
-        );
-
-    -webkit-background-clip:text;
-    background-clip:text;
-
-    color:transparent;
+textarea,
+input,
+select {
+    width: 100%;
+    padding: 15px;
+    margin: 8px 0 15px;
+    border-radius: 14px;
+    border: 1px solid #334155;
+    background: #020617;
+    color: white;
+    font-size: 16px;
+    outline: none;
 }
 
-.hero p {
-    max-width:650px;
-
-    color:var(--muted);
-
-    font-size:18px;
-    line-height:1.9;
+textarea {
+    min-height: 180px;
+    resize: vertical;
 }
 
-.actions {
-    display:flex;
-    flex-wrap:wrap;
-    gap:12px;
-
-    margin-top:30px;
-}
-
+button,
 .btn {
-    min-height:52px;
-
-    padding:0 22px;
-
-    border-radius:15px;
-
-    display:inline-flex;
-    align-items:center;
-    justify-content:center;
-    gap:8px;
-
-    border:1px solid transparent;
-
-    font-weight:900;
-
-    transition:.22s;
+    display: inline-block;
+    border: 0;
+    border-radius: 14px;
+    padding: 14px 22px;
+    background: linear-gradient(135deg, #2563eb, #7c3aed);
+    color: white;
+    font-weight: bold;
+    cursor: pointer;
+    text-decoration: none;
 }
 
+button:hover,
 .btn:hover {
-    transform:translateY(-3px);
+    opacity: .9;
 }
 
-.btn-primary {
-    color:white;
-
-    background:
-        linear-gradient(
-            135deg,
-            #5878ff,
-            #a056ff
-        );
-
-    box-shadow:
-        0 15px 40px rgba(91,124,255,.27);
-}
-
-.btn-primary:hover {
-    box-shadow:
-        0 18px 50px rgba(91,124,255,.42);
-}
-
-.btn-secondary {
-    color:#e9ecff;
-
-    border-color:var(--line);
-
-    background:rgba(255,255,255,.05);
-}
-
-.hero-visual {
-    min-height:420px;
-
-    display:grid;
-    place-items:center;
-
-    position:relative;
-}
-
-.orbit {
-    position:absolute;
-
-    width:350px;
-    height:350px;
-
-    border:1px solid rgba(91,124,255,.18);
-
-    border-radius:50%;
-
-    animation:spin 18s linear infinite;
-}
-
-.orbit:before,
-.orbit:after {
-    content:"";
-
-    position:absolute;
-
-    width:11px;
-    height:11px;
-
-    border-radius:50%;
-
-    background:var(--cyan);
-
-    box-shadow:
-        0 0 15px var(--cyan),
-        0 0 30px var(--cyan);
-}
-
-.orbit:before {
-    top:25px;
-    left:50%;
-}
-
-.orbit:after {
-    right:15px;
-    bottom:50px;
-
-    background:var(--purple);
-
-    box-shadow:
-        0 0 15px var(--purple),
-        0 0 30px var(--purple);
-}
-
-@keyframes spin {
-    to {
-        transform:rotate(360deg);
-    }
-}
-
-.glow-core {
-    width:260px;
-    height:260px;
-
-    display:grid;
-    place-items:center;
-
-    border-radius:50%;
-
-    background:
-        radial-gradient(
-            circle,
-            rgba(91,124,255,.3),
-            rgba(164,92,255,.08),
-            transparent 70%
-        );
-}
-
-.big-logo {
-    width:155px;
-    height:155px;
-
-    display:grid;
-    place-items:center;
-
-    border-radius:42px;
-
-    background:
-        linear-gradient(
-            145deg,
-            rgba(91,124,255,.95),
-            rgba(164,92,255,.9)
-        );
-
-    box-shadow:
-        0 0 65px rgba(91,124,255,.4),
-        0 30px 90px rgba(0,0,0,.4);
-
-    animation:float 4s ease-in-out infinite;
-}
-
-.big-logo svg {
-    width:85px;
-    height:85px;
-}
-
-@keyframes float {
-    0%,100% {
-        transform:translateY(0);
-    }
-
-    50% {
-        transform:translateY(-12px);
-    }
-}
-
-.section {
-    padding:70px 0;
-}
-
-.section-head {
-    text-align:center;
-    margin-bottom:35px;
-}
-
-.section-head h2 {
-    font-size:38px;
-    margin:12px 0;
-}
-
-.section-head p {
-    max-width:650px;
-    margin:auto;
-
-    color:var(--muted);
-
-    line-height:1.8;
-}
-
-.feature-grid {
-    display:grid;
-    grid-template-columns:repeat(3,1fr);
-    gap:17px;
-}
-
-.feature {
-    padding:27px;
-
-    min-height:215px;
-
-    border:1px solid var(--line);
-    border-radius:24px;
-
-    background:
-        linear-gradient(
-            145deg,
-            rgba(255,255,255,.07),
-            rgba(255,255,255,.025)
-        );
-
-    backdrop-filter:blur(15px);
-
-    transition:.25s;
-}
-
-.feature:hover {
-    transform:translateY(-7px);
-
-    border-color:
-        rgba(91,124,255,.35);
-
-    box-shadow:
-        0 25px 60px rgba(0,0,0,.25);
-}
-
-.feature-icon {
-    width:54px;
-    height:54px;
-
-    display:grid;
-    place-items:center;
-
-    border-radius:16px;
-
-    background:
-        rgba(91,124,255,.13);
-
-    border:1px solid rgba(91,124,255,.2);
-
-    font-size:24px;
-}
-
-.feature h3 {
-    margin:20px 0 9px;
-}
-
-.feature p {
-    color:var(--muted);
-    line-height:1.8;
-}
-
-.form-wrap {
-    max-width:760px;
-    margin:65px auto;
-}
-
-.panel {
-    padding:31px;
-
-    border:1px solid var(--line);
-    border-radius:28px;
-
-    background:
-        linear-gradient(
-            145deg,
-            rgba(18,25,51,.9),
-            rgba(8,12,27,.9)
-        );
-
-    box-shadow:
-        0 30px 100px rgba(0,0,0,.28);
-
-    backdrop-filter:blur(20px);
-}
-
-.panel-title {
-    margin-bottom:25px;
-}
-
-.panel-title h2 {
-    margin:17px 0 8px;
-
-    font-size:30px;
-}
-
-.panel-title p {
-    margin:0;
-    color:var(--muted);
-}
-
-.field {
-    margin-bottom:18px;
-}
-
-.field label {
-    display:block;
-
-    margin-bottom:8px;
-
-    color:#e2e6ff;
-
-    font-size:14px;
-    font-weight:800;
-}
-
-.input,
-.textarea,
-.select {
-    width:100%;
-
-    padding:15px 16px;
-
-    outline:none;
-
-    color:white;
-
-    border:1px solid rgba(255,255,255,.1);
-    border-radius:14px;
-
-    background:
-        rgba(255,255,255,.045);
-
-    transition:.2s;
-}
-
-.input:focus,
-.textarea:focus,
-.select:focus {
-    border-color:rgba(91,124,255,.75);
-
-    box-shadow:
-        0 0 0 4px rgba(91,124,255,.09);
-}
-
-.textarea {
-    min-height:180px;
-    resize:vertical;
-}
-
-.submit {
-    width:100%;
-    border:0;
-}
-
-.track-box {
-    max-width:700px;
-
-    margin:75px auto;
-
-    text-align:center;
-}
-
-.track-code {
-    margin:25px 0;
-
-    padding:24px;
-
-    border:1px solid rgba(67,221,255,.2);
-    border-radius:20px;
-
-    background:
-        linear-gradient(
-            135deg,
-            rgba(67,221,255,.07),
-            rgba(91,124,255,.08)
-        );
-
-    color:#e9fcff;
-
-    font-size:31px;
-    font-weight:1000;
-
-    letter-spacing:3px;
-
-    overflow-wrap:anywhere;
-}
-
-.status {
-    display:inline-flex;
-
-    padding:8px 13px;
-
-    border-radius:999px;
-
-    font-size:13px;
-    font-weight:900;
-}
-
-.status-new {
-    background:rgba(91,124,255,.13);
-    color:#b1c0ff;
-}
-
-.status-progress {
-    background:rgba(251,191,36,.12);
-    color:#fcd34d;
-}
-
-.status-done {
-    background:rgba(52,211,153,.12);
-    color:#6ee7b7;
-}
-
-.admin-top {
-    padding:50px 0 25px;
-}
-
-.admin-top h1 {
-    margin:20px 0 7px;
-    font-size:40px;
-}
-
-.admin-top p {
-    color:var(--muted);
-}
-
-.stats {
-    display:grid;
-    grid-template-columns:repeat(3,1fr);
-    gap:15px;
-
-    margin:20px 0;
-}
-
-.stat {
-    padding:22px;
-
-    border:1px solid var(--line);
-    border-radius:20px;
-
-    background:var(--panel);
-}
-
-.stat-label {
-    color:var(--muted);
-    font-size:13px;
-}
-
-.stat-number {
-    margin-top:9px;
-    font-size:35px;
-    font-weight:1000;
-}
-
-.toolbar {
-    display:flex;
-    flex-wrap:wrap;
-    gap:10px;
-
-    margin:22px 0;
-}
-
-.toolbar .input,
-.toolbar .select {
-    flex:1;
-    min-width:190px;
-}
-
-.report-list {
-    display:grid;
-    gap:15px;
+.grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 18px;
 }
 
 .report {
-    padding:23px;
-
-    border:1px solid var(--line);
-    border-radius:21px;
-
-    background:rgba(15,20,39,.8);
-
-    transition:.2s;
+    background: rgba(2, 6, 23, .7);
+    border: 1px solid #1e293b;
+    padding: 20px;
+    border-radius: 18px;
+    margin: 15px 0;
 }
 
-.report:hover {
-    transform:translateY(-2px);
-
-    border-color:
-        rgba(91,124,255,.3);
+.code {
+    font-size: 23px;
+    color: #60a5fa;
+    font-weight: bold;
+    letter-spacing: 2px;
 }
 
-.report-head {
-    display:flex;
-    align-items:center;
-    justify-content:space-between;
-
-    gap:15px;
-
-    margin-bottom:15px;
-}
-
-.report-code {
-    color:#aebdff;
-    font-weight:1000;
-}
-
-.report-date {
-    color:var(--muted);
-    font-size:12px;
-    margin-top:5px;
-}
-
-.report-text {
-    color:#e4e8fb;
-
-    line-height:1.9;
-
-    white-space:pre-wrap;
-    word-break:break-word;
-}
-
-.report-actions {
-    display:flex;
-    flex-wrap:wrap;
-    gap:8px;
-
-    margin-top:18px;
-}
-
-.small-btn {
-    padding:9px 13px;
-
-    border:1px solid var(--line);
-    border-radius:11px;
-
-    color:white;
-
-    background:rgba(255,255,255,.05);
-}
-
-.small-btn:hover {
-    background:rgba(255,255,255,.1);
+.status {
+    display: inline-block;
+    padding: 7px 12px;
+    border-radius: 20px;
+    background: #172554;
+    color: #93c5fd;
 }
 
 .danger {
-    color:#fda4af;
+    background: #991b1b;
 }
 
-.login-page {
-    min-height:calc(100vh - 80px);
-
-    display:grid;
-    place-items:center;
-
-    padding:40px 0;
+.muted {
+    color: #94a3b8;
 }
 
-.login-box {
-    width:min(440px,100%);
-    text-align:center;
+.center {
+    text-align: center;
 }
 
-.login-logo {
-    margin:0 auto 20px;
+.error {
+    color: #fca5a5;
+    background: rgba(127,29,29,.3);
+    padding: 12px;
+    border-radius: 12px;
+    margin-bottom: 15px;
 }
 
-.footer {
-    margin-top:50px;
-    padding:45px 0;
-
-    border-top:1px solid var(--line);
-
-    color:var(--muted);
-
-    text-align:center;
+.success {
+    color: #86efac;
+    background: rgba(20,83,45,.3);
+    padding: 15px;
+    border-radius: 12px;
 }
 
-.fade {
-    animation:fade .6s ease both;
+@media(max-width:700px) {
+    h1 {
+        font-size: 31px;
+    }
+
+    .grid {
+        grid-template-columns: 1fr;
+    }
+
+    .card {
+        padding: 20px;
+    }
+
+    nav {
+        gap: 10px;
+    }
 }
+"""
 
-@keyframes fade {
-    from {
-        opacity:0;
-        transform:translateY(15px);
-    }
 
-    to {
-        opacity:1;
-        transform:translateY(0);
-    }
-}
+def page(title, content):
+    return f"""<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{safe_text(title)}</title>
+<style>{CSS}</style>
+</head>
+<body>
+<div class="container">
+<nav>
+<div class="logo">🛡️ <span>سامانه غدیر</span></div>
+<a class="btn" href="/">خانه</a>
+</nav>
+{content}
+</div>
+</body>
+</html>
+"""
 
-@media(max-width:850px) {
 
-    .nav-links {
-        display:none;
-    }
+# =========================
+# HANDLER
+# =========================
 
-    .container {
-        width:min(100% - 22px,650px);
-    }
+class Handler(BaseHTTPRequestHandler):
 
-    .hero {
-        padding:60px 0 30px;
-    }
+    def log_message(self, format, *args):
+        return
 
-    .hero-grid {
-        grid-template-columns:1fr;
-        gap:10px;
-    }
+    def send_page(self, content, status=200, cookies=None):
+        data = content.encode("utf-8")
 
-    .hero h1 {
-        font-size:53px;
-    }
+        self.send_response(status)
 
-    .hero p {
-        font-size:16px;
-    }
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
 
-    .hero-visual {
-        min-height:350px;
-    }
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(
+            "Permissions-Policy",
+            "camera=(), microphone=(), geolocation=()"
+        )
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; style-src 'unsafe-inline'; form-action 'self'"
+        )
 
-    .orbit {
-        width:280px;
-        height:280px;
-    }
+        if cookies:
+            for cookie in cookies:
+                self.send_header("Set-Cookie", cookie)
 
-    .big-logo {
-        width:125px;
-        height:125px;
-        border-radius:34px;
-    }
+        self.end_headers()
+        self.wfile.write(data)
 
-    .big-logo svg {
-        width:68px;
-        height:68px;
-    }
+    def redirect(self, location, cookies=None):
+        self.send_response(303)
+        self.send_header("Location", location)
 
-    .feature-grid,
-    .stats {
-        gri
+        if cookies:
+            for cookie in cookies:
+                self.send_header("Set-Cookie", cookie)
+
+        self.end_headers()
+
+    def read_body(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return b""
+
+        if length > 15000:
+            return None
+
+        return self.rfile.read(length)
+
+    def form_data(self):
+        body = self.read_body()
+
+        if body is None:
+            return None
+
+        try:
+            text = body.decode("utf-8")
+            parsed = parse_qs(text, keep_blank_values=True)
+
+            return {
+                key: values[0]
+                for key, values in parsed.items()
+            }
+
+        except Exception:
+            return None
+
+    def require_csrf(self, form):
+        _, session = get_session(self)
+
+        if not session:
+            return False
+
+        token = form.get("csrf", "")
+
+        return hmac.compare_digest(
+            token,
+            session["csrf"]
+        )
+
+    def do_GET(self):
+        path = urlparse(self.path).path
+
+        try:
+            if path == "/":
+                self.home()
+                return
+
+            if path == "/report":
+                self.report_page()
+                return
+
+            if path == "/track":
+                self.track_page()
+                return
+
+            if path == "/admin":
+                self.admin_login()
+                return
+
+            if path == "/reports":
+                if not is_logged_in(self):
+                    self.redirect("/admin")
+                    return
+
+                self.dashboard()
+                return
+
+            if path == "/logout":
+                token, _ = get_session(self)
+
+                if token:
+                    SESSIONS.pop(token, None)
+
+                self.redirect(
+                    "/admin",
+                    cookies=[
+                        "session=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Strict"
+                    ]
+                )
+                return
+
+            self.send_page(
+                page(
+                    "404",
+                    '<div class="card center"><h2>صفحه پیدا نشد</h2></div>'
+                ),
+                404
+            )
+
+        except Exception:
+            self.send_page(
+                page(
+                    "خطا",
+                    '<div class="card center"><h2>خطایی رخ داد</h2></div>'
+                ),
+                500
+            )
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+
+        try:
+            if path == "/submit":
+                self.submit_report()
+                return
+
+            if path == "/login":
+                self.login()
+                return
+
+            if path == "/status":
+                self.change_status()
+                return
+
+            if path == "/delete":
+                self.remove_report()
+                return
+
+            self.send_page(
+                page(
+                    "404",
+                    '<div class="card center"><h2>درخواست نامعتبر</h2></div>'
+                ),
+                404
+            )
+
+        except Exception:
+            self.send_page(
+                page(
+                    "خطا",
+                    '<div class="card center"><h2>خطایی رخ داد</h2></div>'
+                ),
+                500
+            )
+
+    # =========================
+    # PAGES
+    # =========================
+
+    def home(self):
+        content = """
+<div class="hero">
+<div class="shield">🛡️</div>
+<h1>سامانه غدیر</h1>
+<p class="subtitle">
+سامانه ثبت و پیگیری گزارش‌ها
+<br>
+ساده، آنلاین و قابل استفاده در دستگاه‌های مختلف
+</p>
+
+<div class="grid">
+<div class="card">
+<h2>📝 ثبت گزارش</h2>
+<p class="muted">
+گزارش خود را ثبت کنید و کد پیگیری دریافت کنید.
+</p>
+<a class="btn" href="/report">ثبت گزارش</a>
+</div>
+
+<div class="card">
+<h2>🔎 پیگیری</h2>
+<p class="muted">
+با کد پیگیری، وضعیت گزارش را مشاهده کنید.
+</p>
+<a class="btn" href="/track">پیگیری گزارش</a>
+</div>
+</div>
+
+<div class="card center">
+<h2>🔐 مدیریت</h2>
+<a class="btn" href="/admin">ورود مدیریت</a>
+</div>
+</div>
+"""
+
+        self.send_page(page("سامانه غدیر", content))
+
+    def report_page(self, error=""):
+        error_html = ""
+
+        if error:
+            error_html = f'<div class="error">{safe_text(error)}</div>'
+
+        content = f"""
+<div class="card">
+<h1>📝 ثبت گزارش</h1>
+
+{error_html}
+
+<form method="post" action="/submit">
+
+<label>رمز ثبت گزارش</label>
+<input
+type="password"
+name="password"
+maxlength="100"
+required
+>
+
+<label>متن گزارش</label>
+<textarea
+name="report"
+maxlength="{MAX_REPORT_LENGTH}"
+required
+placeholder="گزارش خود را اینجا بنویسید..."
+></textarea>
+
+<button type="submit">🔒 ثبت امن گزارش</button>
+
+</form>
+</div>
+"""
+
+        self.send_page(page("ثبت گزارش", content))
+
+    def track_page(self, message=""):
+        message_html = ""
+
+        if message:
+            message_html = message
+
+        content = f"""
+<div class="card">
+<h1>🔎 پیگیری گزارش</h1>
+
+{message_html}
+
+<form method="get" action="/track">
+
+<label>کد پیگیری</label>
+<input
+name="code"
+placeholder="GHD-XXXXXXXXXX"
+maxlength="14"
+required
+>
+
+<button type="submit">پیگیری</button>
+
+</form>
+</div>
+"""
+
+        query = parse_qs(urlparse(self.path).query)
+        code = query.get("code", [""])[0].strip().upper()
+
+        if code:
+            if not valid_tracking(code):
+                content += """
+<div class="card">
+<div class="error">
+کد پیگیری نامعتبر است.
+</div>
+</div>
+"""
+            else:
+                report = get_report_by_code(code)
+
+                if not report:
+                    content += """
+<div class="card">
+<div class="error">
+گزارشی با این کد پیدا نشد.
+</div>
+</div>
+"""
+                else:
+                    content += f"""
+<div class="card center">
+<h2>گزارش پیدا شد ✅</h2>
+<p>کد پیگیری</p>
+<div class="code">{safe_text(report.get("tracking_code"))}</div>
+<br>
+<p>وضعیت</p>
+<div class="status">{safe_text(report.get("status"))}</div>
+<br><br>
+<p class="muted">
+زمان ثبت: {safe_text(report.get("created_at"))}
+</p>
+</div>
+"""
+
+        self.send_page(page("پیگیری گزارش", content))
+
+    def admin_login(self, error=""):
+        error_html = ""
+
+        if error:
+            error_html = f'<div class="error">{safe_text(error)}</div>'
+
+        content = f"""
+<div class="card center">
+<h1>🔐 مدیریت</h1>
+
+{error_html}
+
+<form method="post" action="/login">
+
+<input
+type="password"
+name="password"
+maxlength="100"
+placeholder="رمز مدیریت"
+required
+>
+
+<button type="submit">ورود</button>
+
+</form>
+</div>
+"""
+
+        self.send_page(page("ورود مدیریت", content))
+
+    # =========================
+    # ACTIONS
+    # =========================
+
+    def submit_report(self):
+        form = self.form_data()
+
+        if not form:
+            self.report_page("درخواست نامعتبر است.")
+            return
+
+        password = form.get("password", "")
+        report = form.get("report", "").strip()
+
+        if not password_ok(password, REPORT_PASSWORD):
+            self.report_page("رمز ثبت گزارش اشتباه است.")
+            return
+
+        if not report:
+            self.report_page("متن گزارش خالی است.")
+            return
+
+        if len(report) > MAX_REPORT_LENGTH:
+            self.report_page("گزارش بیش از حد طولانی است.")
+            return
+
+        code = create_report(report)
+
+        content = f"""
+<div class="card center">
+<h1>✅ گزارش ثبت شد</h1>
+
+<p>گزارش شما با موفقیت ثبت شد.</p>
+
+<p>کد پیگیری خود را نگه دارید:</p>
+
+<div class="code">{safe_text(code)}</div>
+
+<br>
+
+<a class="btn" href="/track?code={safe_text(code)}">
+پیگیری گزارش
+</a>
+
+</div>
+"""
+
+        self.send_page(page("گزارش ثبت شد", content))
+
+    def login(self):
+        form = self.form_data()
+
+        if not form:
+            self.admin_login("درخواست نامعتبر است.")
+            return
+
+        ip = self.client_address[0]
+
+        if not check_login_limit(ip):
+            self.admin_login(
+                "تعداد تلاش‌های ورود زیاد است. کمی بعد دوباره تلاش کنید."
+            )
+            return
+
+        password = form.get("password", "")
+
+        if not password_ok(password, ADMIN_PASSWORD):
+            failed_login(ip)
+            self.admin_login("رمز مدیریت اشتباه است.")
+            return
+
+        LOGIN_ATTEMPTS.pop(ip, None)
+
+        token, csrf = create_session()
+
+        cookies = [
+            "session=" + token +
+            "; Path=/; HttpOnly; Secure; SameSite=Strict"
+        ]
+
+        self.redirect("/reports", cookies)
+
+    def dashboard(self):
+        reports = get_reports()
+
+        _, session = get_session(self)
+
+        csrf = session["csrf"]
+
+        total = len(reports)
+
+        new_count = sum(
+            1 for r in reports
+            if r.get("status") == "جدید"
+        )
+
+        checking_count = sum(
+            1 for r in reports
+            if r.get("status") == "در حال بررسی"
+        )
+
+        closed_count = sum(
+            1 for r in reports
+            if r.get("status") == "بسته شد"
+        )
+
+        content = f"""
+<div class="card">
+<div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap">
+<div>
+<h1>📊 داشبورد مدیریت</h1>
+<p class="muted">مدیریت گزارش‌های ثبت‌شده</p>
+</div>
+<a class="btn" href="/logout">خروج</a>
+</div>
+</div>
+
+<div class="grid">
+
+<div class="card center">
+<h2>{total}</h2>
+<p class="muted">کل گزارش‌ها</p>
+</div>
+
+<div class="card center">
+<h2>{new_count}</h2>
+<p class="muted">گزارش جدید</p>
+</div>
+
+<div class="card center">
+<h2>{checking_count}</h2>
+<p class="muted">در حال بررسی</p>
+</div>
+
+<div class="card center">
+<h2>{closed_count}</h2>
+<p class="muted">بسته شده</p>
+</div>
+
+</div>
+"""
+
+        if not reports:
+            content += """
+<div class="card center">
+<h2>هنوز گزارشی ثبت نشده است.</h2>
+</div>
+"""
+
+        for report in reports:
+            rid = report.get("id")
+            code = report.get("tracking_code", "")
+            status = report.get("status", "جدید")
+            text = report.get("report", "")
+            created = report.get("created_at", "")
+
+            content += f"""
+<div class="report">
+
+<div class="code">
+{safe_text(code)}
+</div>
+
+<p>{safe_text(text)}</p>
+
+<p class="muted">
+{safe_text(created)}
+</p>
+
+<div class="grid">
+
+<form method="post" action="/status">
+<input type="hid
