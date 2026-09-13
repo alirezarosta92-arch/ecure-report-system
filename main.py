@@ -13,6 +13,8 @@ import hmac
 # =========================
 
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+REPORT_PASSWORD = os.environ.get("REPORT_PASSWORD", "")
+
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SECRET_KEY = os.environ.get("SUPABASE_SECRET_KEY", "")
 
@@ -24,6 +26,7 @@ SESSION_TOKEN = secrets.token_urlsafe(32)
 # =========================
 
 def supabase_request(method, url, data=None):
+
     headers = {
         "apikey": SUPABASE_SECRET_KEY,
         "Authorization": "Bearer " + SUPABASE_SECRET_KEY,
@@ -44,11 +47,25 @@ def supabase_request(method, url, data=None):
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            text = response.read().decode("utf-8")
 
-            print("SUPABASE STATUS:", response.status)
-            print("SUPABASE RESPONSE:", text)
+        with urllib.request.urlopen(
+            request,
+            timeout=15
+        ) as response:
+
+            text = response.read().decode(
+                "utf-8"
+            )
+
+            print(
+                "SUPABASE STATUS:",
+                response.status
+            )
+
+            print(
+                "SUPABASE RESPONSE:",
+                text
+            )
 
             if text:
                 return json.loads(text)
@@ -56,28 +73,45 @@ def supabase_request(method, url, data=None):
             return None
 
     except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8", errors="replace")
 
-        print("SUPABASE HTTP ERROR:", e.code)
-        print("SUPABASE ERROR BODY:", error_body)
+        error_body = e.read().decode(
+            "utf-8",
+            errors="replace"
+        )
+
+        print(
+            "SUPABASE HTTP ERROR:",
+            e.code
+        )
+
+        print(
+            "SUPABASE ERROR BODY:",
+            error_body
+        )
 
         raise Exception(
             f"Supabase HTTP {e.code}: {error_body}"
         )
 
     except Exception as e:
-        print("SUPABASE ERROR:", repr(e))
+
+        print(
+            "SUPABASE ERROR:",
+            repr(e)
+        )
+
         raise
 
 
 # =========================
-# HTML مشترک
+# HTML اصلی
 # =========================
 
 def page(title, content):
 
     return f"""
 <!DOCTYPE html>
+
 <html lang="fa" dir="rtl">
 
 <head>
@@ -132,6 +166,7 @@ textarea {{
     font-family: Tahoma, Arial, sans-serif;
     background: #334155;
     color: white;
+    margin-top: 10px;
 }}
 
 input[type="password"] {{
@@ -143,7 +178,7 @@ input[type="password"] {{
     background: #334155;
     color: white;
     font-size: 16px;
-    margin-bottom: 15px;
+    margin-bottom: 10px;
 }}
 
 button {{
@@ -242,11 +277,18 @@ button:hover {{
 def main_page():
 
     content = """
+
 <div class="card">
 
 <h1>📝 سامانه غدیر</h1>
 
 <form method="POST" action="/report">
+
+<input
+type="password"
+name="report_password"
+placeholder="رمز ثبت گزارش"
+required>
 
 <textarea
 name="report"
@@ -264,9 +306,13 @@ required></textarea>
 </a>
 
 </div>
+
 """
 
-    return page("سامانه گزارش امن", content)
+    return page(
+        "سامانه غدیر",
+        content
+    )
 
 
 # =========================
@@ -276,6 +322,7 @@ required></textarea>
 def success_page():
 
     content = """
+
 <div class="card">
 
 <div class="success">
@@ -293,9 +340,13 @@ def success_page():
 </a>
 
 </div>
+
 """
 
-    return page("ثبت موفق", content)
+    return page(
+        "ثبت موفق",
+        content
+    )
 
 
 # =========================
@@ -304,9 +355,12 @@ def success_page():
 
 def error_page(error_text):
 
-    safe_error = html.escape(str(error_text))
+    safe_error = html.escape(
+        str(error_text)
+    )
 
     content = f"""
+
 <div class="card">
 
 <div class="error">
@@ -322,9 +376,13 @@ def error_page(error_text):
 </a>
 
 </div>
+
 """
 
-    return page("خطا", content)
+    return page(
+        "خطا",
+        content
+    )
 
 
 # =========================
@@ -334,6 +392,7 @@ def error_page(error_text):
 def admin_login_page():
 
     content = """
+
 <div class="card">
 
 <h1>🔐 ورود مدیریت</h1>
@@ -357,9 +416,13 @@ required>
 </a>
 
 </div>
+
 """
 
-    return page("ورود مدیریت", content)
+    return page(
+        "ورود مدیریت",
+        content
+    )
 
 
 # =========================
@@ -377,13 +440,21 @@ def reports_page():
             + "&order=created_at.desc"
         )
 
-        reports = supabase_request("GET", url)
+        reports = supabase_request(
+            "GET",
+            url
+        )
 
         if not reports:
+
             reports_html = """
+
 <div class="empty">
+
 هنوز گزارشی ثبت نشده است.
+
 </div>
+
 """
 
         else:
@@ -392,14 +463,26 @@ def reports_page():
 
             for item in reports:
 
-                report_id = str(item.get("id", ""))
+                report_id = str(
+                    item.get("id", "")
+                )
 
                 report_text = html.escape(
-                    str(item.get("report", ""))
+                    str(
+                        item.get(
+                            "report",
+                            ""
+                        )
+                    )
                 )
 
                 created_at = html.escape(
-                    str(item.get("created_at", ""))
+                    str(
+                        item.get(
+                            "created_at",
+                            ""
+                        )
+                    )
                 )
 
                 reports_html += f"""
@@ -414,7 +497,9 @@ def reports_page():
 زمان ثبت: {created_at}
 </div>
 
-<form method="POST" action="/delete">
+<form
+method="POST"
+action="/delete">
 
 <input
 type="hidden"
@@ -437,6 +522,7 @@ onclick="return confirm('آیا از حذف این گزارش مطمئن هست�
 """
 
         content = f"""
+
 <div class="card">
 
 <h1>📋 گزارش‌های ثبت‌شده</h1>
@@ -448,9 +534,13 @@ onclick="return confirm('آیا از حذف این گزارش مطمئن هست�
 </a>
 
 </div>
+
 """
 
-        return page("گزارش‌ها", content)
+        return page(
+            "گزارش‌های سامانه غدیر",
+            content
+        )
 
     except Exception as e:
 
@@ -462,10 +552,6 @@ onclick="return confirm('آیا از حذف این گزارش مطمئن هست�
 # =========================
 
 class Server(BaseHTTPRequestHandler):
-
-    # -------------------------
-    # HEAD
-    # -------------------------
 
     def do_HEAD(self):
 
@@ -486,35 +572,50 @@ class Server(BaseHTTPRequestHandler):
         self.end_headers()
 
 
-    # -------------------------
+    # =====================
     # GET
-    # -------------------------
+    # =====================
 
     def do_GET(self):
 
         if self.path == "/":
 
-            self.send_html(main_page())
+            self.send_html(
+                main_page()
+            )
+
             return
 
 
         if self.path == "/admin":
 
-            self.send_html(admin_login_page())
+            self.send_html(
+                admin_login_page()
+            )
+
             return
 
 
         if self.path == "/reports":
 
-            cookie = self.headers.get("Cookie", "")
+            cookie = self.headers.get(
+                "Cookie",
+                ""
+            )
 
-            if cookie == "session=" + SESSION_TOKEN:
+            if cookie == (
+                "session="
+                + SESSION_TOKEN
+            ):
 
-                self.send_html(reports_page())
+                self.send_html(
+                    reports_page()
+                )
 
             else:
 
                 self.send_response(403)
+
                 self.send_header(
                     "Content-Type",
                     "text/html; charset=utf-8"
@@ -523,7 +624,9 @@ class Server(BaseHTTPRequestHandler):
                 self.end_headers()
 
                 self.wfile.write(
-                    "دسترسی غیرمجاز".encode("utf-8")
+                    "دسترسی غیرمجاز".encode(
+                        "utf-8"
+                    )
                 )
 
             return
@@ -533,28 +636,52 @@ class Server(BaseHTTPRequestHandler):
         self.end_headers()
 
 
-    # -------------------------
+    # =====================
     # POST
-    # -------------------------
+    # =====================
 
     def do_POST(self):
 
         length = int(
-            self.headers.get("Content-Length", 0)
+            self.headers.get(
+                "Content-Length",
+                0
+            )
         )
 
-        data = self.rfile.read(length).decode(
+        data = self.rfile.read(
+            length
+        ).decode(
             "utf-8"
         )
 
         info = parse_qs(data)
 
 
-        # =====================
+        # =================
         # ثبت گزارش
-        # =====================
+        # =================
 
         if self.path == "/report":
+
+            report_password = info.get(
+                "report_password",
+                [""]
+            )[0]
+
+            if not hmac.compare_digest(
+                report_password,
+                REPORT_PASSWORD
+            ):
+
+                self.send_html(
+                    error_page(
+                        "رمز ثبت گزارش اشتباه است."
+                    )
+                )
+
+                return
+
 
             report = info.get(
                 "report",
@@ -565,7 +692,9 @@ class Server(BaseHTTPRequestHandler):
             if not report:
 
                 self.send_html(
-                    error_page("متن گزارش خالی است.")
+                    error_page(
+                        "متن گزارش خالی است."
+                    )
                 )
 
                 return
@@ -609,9 +738,9 @@ class Server(BaseHTTPRequestHandler):
             return
 
 
-        # =====================
+        # =================
         # ورود مدیریت
-        # =====================
+        # =================
 
         if self.path == "/login":
 
@@ -653,9 +782,9 @@ class Server(BaseHTTPRequestHandler):
             return
 
 
-        # =====================
+        # =================
         # حذف گزارش
-        # =====================
+        # =================
 
         if self.path == "/delete":
 
@@ -665,7 +794,10 @@ class Server(BaseHTTPRequestHandler):
             )
 
 
-            if cookie != "session=" + SESSION_TOKEN:
+            if cookie != (
+                "session="
+                + SESSION_TOKEN
+            ):
 
                 self.send_response(403)
 
@@ -677,7 +809,9 @@ class Server(BaseHTTPRequestHandler):
                 self.end_headers()
 
                 self.wfile.write(
-                    "دسترسی غیرمجاز".encode("utf-8")
+                    "دسترسی غیرمجاز".encode(
+                        "utf-8"
+                    )
                 )
 
                 return
@@ -689,7 +823,6 @@ class Server(BaseHTTPRequestHandler):
             )[0]
 
 
-            # فقط ID عددی مجاز است
             if not report_id.isdigit():
 
                 self.send_html(
@@ -747,9 +880,9 @@ class Server(BaseHTTPRequestHandler):
         self.end_headers()
 
 
-    # -------------------------
+    # =====================
     # ارسال HTML
-    # -------------------------
+    # =====================
 
     def send_html(self, content):
 
@@ -763,7 +896,9 @@ class Server(BaseHTTPRequestHandler):
         self.end_headers()
 
         self.wfile.write(
-            content.encode("utf-8")
+            content.encode(
+                "utf-8"
+            )
         )
 
 
@@ -772,17 +907,49 @@ class Server(BaseHTTPRequestHandler):
 # =========================
 
 PORT = int(
-    os.environ.get("PORT", 8080)
+    os.environ.get(
+        "PORT",
+        8080
+    )
 )
 
-print("================================")
-print("سامانه گزارش اجرا شد")
-print("SUPABASE_URL:", SUPABASE_URL)
+print(
+    "================================"
+)
+
+print(
+    "سامانه غدیر اجرا شد"
+)
+
+print(
+    "SUPABASE_URL:",
+    SUPABASE_URL
+)
+
 print(
     "SUPABASE_SECRET_KEY موجود:",
-    bool(SUPABASE_SECRET_KEY)
+    bool(
+        SUPABASE_SECRET_KEY
+    )
 )
-print("================================")
+
+print(
+    "ADMIN_PASSWORD موجود:",
+    bool(
+        ADMIN_PASSWORD
+    )
+)
+
+print(
+    "REPORT_PASSWORD موجود:",
+    bool(
+        REPORT_PASSWORD
+    )
+)
+
+print(
+    "================================"
+)
 
 
 server = HTTPServer(
