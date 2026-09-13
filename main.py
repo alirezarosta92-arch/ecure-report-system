@@ -16,27 +16,28 @@ SESSION_TOKEN = secrets.token_urlsafe(32)
 
 def supabase_request(method, url, data=None):
 
+    headers = {
+        "apikey": SUPABASE_SECRET_KEY,
+        "Authorization": "Bearer " + SUPABASE_SECRET_KEY,
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+    }
+
+    body = None
+
+    if data is not None:
+        body = json.dumps(data).encode("utf-8")
+
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers=headers,
+        method=method
+    )
+
     try:
-        headers = {
-            "apikey": SUPABASE_SECRET_KEY,
-            "Authorization": "Bearer " + SUPABASE_SECRET_KEY,
-            "Content-Type": "application/json",
-            "Prefer": "return=minimal"
-        }
-
-        body = None
-
-        if data is not None:
-            body = json.dumps(data).encode("utf-8")
-
-        request = urllib.request.Request(
-            url,
-            data=body,
-            headers=headers,
-            method=method
-        )
-
         with urllib.request.urlopen(request, timeout=15) as response:
+
             text = response.read().decode("utf-8")
 
             print("SUPABASE STATUS:", response.status)
@@ -54,12 +55,104 @@ def supabase_request(method, url, data=None):
         raise
 
 
+def error_page(error_text):
+
+    safe_error = html.escape(str(error_text))
+
+    return f"""
+    <!DOCTYPE html>
+    <html lang="fa">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport"
+              content="width=device-width, initial-scale=1">
+        <title>خطا</title>
+
+        <style>
+            body {{
+                margin:0;
+                direction:rtl;
+                font-family:Tahoma,Arial,sans-serif;
+                background:#0f172a;
+                color:white;
+                padding:25px;
+            }}
+
+            .box {{
+                max-width:650px;
+                margin:40px auto;
+                background:#1e293b;
+                border-radius:20px;
+                padding:25px;
+                border:1px solid #475569;
+            }}
+
+            .title {{
+                color:#f87171;
+                font-size:22px;
+                font-weight:bold;
+            }}
+
+            .error {{
+                direction:ltr;
+                text-align:left;
+                background:#020617;
+                color:#fca5a5;
+                padding:18px;
+                border-radius:12px;
+                margin-top:20px;
+                white-space:pre-wrap;
+                overflow-wrap:anywhere;
+                font-family:monospace;
+            }}
+
+            a {{
+                display:block;
+                margin-top:20px;
+                color:#93c5fd;
+                text-decoration:none;
+                text-align:center;
+            }}
+        </style>
+    </head>
+
+    <body>
+
+        <div class="box">
+
+            <div class="title">
+                ❌ ثبت گزارش ناموفق بود
+            </div>
+
+            <p>
+                علت خطا:
+            </p>
+
+            <div class="error">
+                {safe_error}
+            </div>
+
+            <a href="/">
+                ← بازگشت به صفحه اصلی
+            </a>
+
+        </div>
+
+    </body>
+    </html>
+    """
+
+
 صفحه_اصلی = """
 <!DOCTYPE html>
 <html lang="fa">
+
 <head>
+
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<meta name="viewport"
+      content="width=device-width, initial-scale=1">
 
 <title>سامانه گزارش</title>
 
@@ -79,9 +172,11 @@ body{
     radial-gradient(circle at top,#263b70,#111827 55%,#070b14);
 
     color:white;
+
     display:flex;
     align-items:center;
     justify-content:center;
+
     padding:20px;
 }
 
@@ -92,9 +187,13 @@ body{
 
 .card{
     background:rgba(255,255,255,0.09);
+
     backdrop-filter:blur(18px);
+
     border:1px solid rgba(255,255,255,0.15);
+
     border-radius:25px;
+
     padding:28px;
 
     box-shadow:
@@ -166,6 +265,7 @@ button{
     margin-top:15px;
 
     font-family:Tahoma,Arial,sans-serif;
+
     font-size:17px;
     font-weight:bold;
 
@@ -182,21 +282,30 @@ button{
 
 .admin{
     display:block;
+
     text-align:center;
+
     margin-top:22px;
+
     color:#bfdbfe;
+
     text-decoration:none;
+
     font-size:14px;
 }
 
 .footer{
     text-align:center;
+
     margin-top:18px;
+
     color:#94a3b8;
+
     font-size:12px;
 }
 
 </style>
+
 </head>
 
 <body>
@@ -205,9 +314,13 @@ button{
 
 <div class="card">
 
-<div class="logo">🔐</div>
+<div class="logo">
+🔐
+</div>
 
-<h1>سامانه گزارش</h1>
+<h1>
+سامانه گزارش
+</h1>
 
 <div class="subtitle">
 گزارش خود را ثبت کنید
@@ -240,6 +353,7 @@ required
 </div>
 
 </body>
+
 </html>
 """
 
@@ -264,24 +378,7 @@ def صفحه_مدیریت():
 
         print("GET REPORTS ERROR:", repr(e))
 
-        return """
-        <html>
-        <body dir="rtl"
-        style="font-family:Tahoma;padding:30px">
-
-        <h2>❌ خطا در دریافت گزارش‌ها</h2>
-
-        <p>
-        اتصال به پایگاه داده برقرار نشد.
-        </p>
-
-        <a href="/admin">
-        بازگشت
-        </a>
-
-        </body>
-        </html>
-        """
+        return error_page(e)
 
     کارت‌ها = ""
 
@@ -338,7 +435,7 @@ def صفحه_مدیریت():
     <meta charset="UTF-8">
 
     <meta name="viewport"
-    content="width=device-width, initial-scale=1">
+          content="width=device-width, initial-scale=1">
 
     <title>مدیریت گزارش‌ها</title>
 
@@ -467,12 +564,33 @@ def صفحه_مدیریت():
 
 class Server(BaseHTTPRequestHandler):
 
+    def do_HEAD(self):
+
+        if self.path == "/":
+
+            self.send_response(200)
+
+            self.send_header(
+                "Content-Type",
+                "text/html; charset=utf-8"
+            )
+
+            self.end_headers()
+
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
+
     def do_GET(self):
 
         if self.path == "/":
 
             self.send_html(صفحه_اصلی)
+
             return
+
 
         if self.path == "/admin":
 
@@ -487,7 +605,7 @@ class Server(BaseHTTPRequestHandler):
             <meta charset="UTF-8">
 
             <meta name="viewport"
-            content="width=device-width, initial-scale=1">
+                  content="width=device-width, initial-scale=1">
 
             <title>ورود مدیریت</title>
 
@@ -624,9 +742,13 @@ class Server(BaseHTTPRequestHandler):
 
             return
 
+
         if self.path == "/reports":
 
-            cookie = self.headers.get("Cookie", "")
+            cookie = self.headers.get(
+                "Cookie",
+                ""
+            )
 
             if cookie == "session=" + SESSION_TOKEN:
 
@@ -637,6 +759,7 @@ class Server(BaseHTTPRequestHandler):
             else:
 
                 self.send_response(403)
+
                 self.end_headers()
 
                 self.wfile.write(
@@ -644,6 +767,7 @@ class Server(BaseHTTPRequestHandler):
                 )
 
             return
+
 
         self.send_response(404)
         self.end_headers()
@@ -661,7 +785,7 @@ class Server(BaseHTTPRequestHandler):
         داده = self.rfile.read(
             طول
         ).decode("utf-8")
-
+        
         اطلاعات = parse_qs(داده)
 
 
@@ -677,14 +801,20 @@ class Server(BaseHTTPRequestHandler):
 
                 self.send_html("""
                 <html>
+
                 <body dir="rtl"
                 style="font-family:Tahoma;padding:30px">
 
-                <h2>⚠️ گزارش خالی است.</h2>
+                <h2>
+                ⚠️ گزارش خالی است.
+                </h2>
 
-                <a href="/">بازگشت</a>
+                <a href="/">
+                بازگشت
+                </a>
 
                 </body>
+
                 </html>
                 """)
 
@@ -698,7 +828,10 @@ class Server(BaseHTTPRequestHandler):
                     + "/rest/v1/reports"
                 )
 
-                print("SENDING REPORT TO:", url)
+                print(
+                    "SENDING REPORT TO:",
+                    url
+                )
 
                 supabase_request(
                     "POST",
@@ -708,6 +841,7 @@ class Server(BaseHTTPRequestHandler):
                     }
                 )
 
+
                 self.send_html("""
 
                 <html>
@@ -716,8 +850,7 @@ class Server(BaseHTTPRequestHandler):
 
                 <meta
                 name="viewport"
-                content="width=device-width,initial-scale=1"
-                >
+                content="width=device-width,initial-scale=1">
 
                 </head>
 
@@ -770,38 +903,17 @@ class Server(BaseHTTPRequestHandler):
 
                 """)
 
+
             except Exception as e:
 
-                print("REPORT SAVE ERROR:", repr(e))
+                print(
+                    "REPORT SAVE ERROR:",
+                    repr(e)
+                )
 
-                self.send_html("""
-
-                <html>
-
-                <body
-                dir="rtl"
-                style="
-                font-family:Tahoma;
-                padding:30px
-                ">
-
-                <h2>
-                ❌ ثبت گزارش ناموفق بود.
-                </h2>
-
-                <p>
-                اتصال به پایگاه داده برقرار نشد.
-                </p>
-
-                <a href="/">
-                بازگشت
-                </a>
-
-                </body>
-
-                </html>
-
-                """)
+                self.send_html(
+                    error_page(e)
+                )
 
             return
 
@@ -892,12 +1004,19 @@ PORT = int(
     )
 )
 
+
 print("سامانه اجرا شد")
-print("SUPABASE_URL:", SUPABASE_URL)
+
+print(
+    "SUPABASE_URL:",
+    SUPABASE_URL
+)
+
 print(
     "SUPABASE_SECRET_KEY موجود:",
     bool(SUPABASE_SECRET_KEY)
 )
+
 
 سرور = HTTPServer(
     ("0.0.0.0", PORT),
