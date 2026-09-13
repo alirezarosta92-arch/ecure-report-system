@@ -16,31 +16,42 @@ SESSION_TOKEN = secrets.token_urlsafe(32)
 
 def supabase_request(method, url, data=None):
 
-    headers = {
-        "apikey": SUPABASE_SECRET_KEY,
-        "Authorization": "Bearer " + SUPABASE_SECRET_KEY,
-        "Content-Type": "application/json"
-    }
+    try:
+        headers = {
+            "apikey": SUPABASE_SECRET_KEY,
+            "Authorization": "Bearer " + SUPABASE_SECRET_KEY,
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal"
+        }
 
-    body = None
+        body = None
 
-    if data is not None:
-        body = json.dumps(data).encode("utf-8")
+        if data is not None:
+            body = json.dumps(data).encode("utf-8")
 
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers=headers,
-        method=method
-    )
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers=headers,
+            method=method
+        )
 
-    with urllib.request.urlopen(request, timeout=15) as response:
-        text = response.read().decode("utf-8")
+        with urllib.request.urlopen(request, timeout=15) as response:
+            text = response.read().decode("utf-8")
 
-        if text:
-            return json.loads(text)
+            print("SUPABASE STATUS:", response.status)
+            print("SUPABASE RESPONSE:", text)
 
-        return None
+            if text:
+                return json.loads(text)
+
+            return None
+
+    except Exception as e:
+
+        print("SUPABASE ERROR:", repr(e))
+
+        raise
 
 
 صفحه_اصلی = """
@@ -109,9 +120,6 @@ body{
         #4f8cff,
         #7c3aed
     );
-
-    box-shadow:
-    0 10px 30px rgba(79,140,255,0.35);
 }
 
 h1{
@@ -143,13 +151,8 @@ textarea{
     font-family:Tahoma,Arial,sans-serif;
     font-size:16px;
 
-    background:rgba(255,255,255,0.95);
+    background:white;
     color:#111827;
-}
-
-textarea:focus{
-    box-shadow:
-    0 0 0 3px rgba(79,140,255,0.35);
 }
 
 button{
@@ -175,13 +178,6 @@ button{
         #4f8cff,
         #7c3aed
     );
-
-    box-shadow:
-    0 8px 25px rgba(79,140,255,0.3);
-}
-
-button:active{
-    transform:scale(0.98);
 }
 
 .admin{
@@ -209,13 +205,9 @@ button:active{
 
 <div class="card">
 
-<div class="logo">
-🔐
-</div>
+<div class="logo">🔐</div>
 
-<h1>
-سامانه گزارش
-</h1>
+<h1>سامانه گزارش</h1>
 
 <div class="subtitle">
 گزارش خود را ثبت کنید
@@ -268,7 +260,9 @@ def صفحه_مدیریت():
             url
         )
 
-    except Exception:
+    except Exception as e:
+
+        print("GET REPORTS ERROR:", repr(e))
 
         return """
         <html>
@@ -306,21 +300,11 @@ def صفحه_مدیریت():
         for شماره, گزارش in enumerate(گزارش‌ها, 1):
 
             متن = html.escape(
-                str(
-                    گزارش.get(
-                        "report",
-                        ""
-                    )
-                )
+                str(گزارش.get("report", ""))
             )
 
             زمان = html.escape(
-                str(
-                    گزارش.get(
-                        "created_at",
-                        ""
-                    )
-                )
+                str(گزارش.get("created_at", ""))
             )
 
             کارت‌ها += f"""
@@ -487,10 +471,7 @@ class Server(BaseHTTPRequestHandler):
 
         if self.path == "/":
 
-            self.send_html(
-                صفحه_اصلی
-            )
-
+            self.send_html(صفحه_اصلی)
             return
 
         if self.path == "/admin":
@@ -645,10 +626,7 @@ class Server(BaseHTTPRequestHandler):
 
         if self.path == "/reports":
 
-            cookie = self.headers.get(
-                "Cookie",
-                ""
-            )
+            cookie = self.headers.get("Cookie", "")
 
             if cookie == "session=" + SESSION_TOKEN:
 
@@ -659,13 +637,10 @@ class Server(BaseHTTPRequestHandler):
             else:
 
                 self.send_response(403)
-
                 self.end_headers()
 
                 self.wfile.write(
-                    "دسترسی غیرمجاز".encode(
-                        "utf-8"
-                    )
+                    "دسترسی غیرمجاز".encode("utf-8")
                 )
 
             return
@@ -687,9 +662,7 @@ class Server(BaseHTTPRequestHandler):
             طول
         ).decode("utf-8")
 
-        اطلاعات = parse_qs(
-            داده
-        )
+        اطلاعات = parse_qs(داده)
 
 
         if self.path == "/report":
@@ -724,6 +697,8 @@ class Server(BaseHTTPRequestHandler):
                     SUPABASE_URL
                     + "/rest/v1/reports"
                 )
+
+                print("SENDING REPORT TO:", url)
 
                 supabase_request(
                     "POST",
@@ -795,7 +770,9 @@ class Server(BaseHTTPRequestHandler):
 
                 """)
 
-            except Exception:
+            except Exception as e:
+
+                print("REPORT SAVE ERROR:", repr(e))
 
                 self.send_html("""
 
@@ -915,11 +892,16 @@ PORT = int(
     )
 )
 
+print("سامانه اجرا شد")
+print("SUPABASE_URL:", SUPABASE_URL)
+print(
+    "SUPABASE_SECRET_KEY موجود:",
+    bool(SUPABASE_SECRET_KEY)
+)
+
 سرور = HTTPServer(
     ("0.0.0.0", PORT),
     Server
 )
-
-print("سامانه اجرا شد")
 
 سرور.serve_forever()
