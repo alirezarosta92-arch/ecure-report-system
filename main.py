@@ -1,72 +1,143 @@
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import parse_qs, urlparse, quote
-import urllib.request
-import urllib.error
-import json
-import html
+
 import os
+import json
 import secrets
+import hashlib
 import hmac
 import time
+import urllib.request
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http import cookies
+from datetime import datetime, timezone
 
-# =========================
-# تنظیمات
-# =========================
+# =========================================================
+# CONFIG
+# =========================================================
+
+PORT = int(os.environ.get("PORT", "10000"))
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY = os.environ.get("SUPABASE_SECRET_KEY", "")
 
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 REPORT_PASSWORD = os.environ.get("REPORT_PASSWORD", "")
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
-SUPABASE_SECRET_KEY = os.environ.get("SUPABASE_SECRET_KEY", "")
 
-PORT = int(os.environ.get("PORT", 8080))
+# Session lifetime: 2 hours
+SESSION_TTL = 60 * 60 * 2
 
-SESSION_COOKIE_NAME = "session"
-CSRF_COOKIE_NAME = "csrf_token"
-SESSION_TTL = int(os.environ.get("SESSION_TTL", 3600))
-COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "1") != "0"
+# Login protection
+MAX_LOGIN_ATTEMPTS = 5
+LOGIN_WINDOW = 10 * 60
+LOCK_TIME = 15 * 60
 
+# Request limits
+MAX_REPORT_LENGTH = 10000
+MAX_TRACKING_LENGTH = 50
+
+# In-memory security stores
 SESSIONS = {}
+LOGIN_ATTEMPTS = {}
+
+# =========================================================
+# SECURITY HELPERS
+# =========================================================
+
+def now():
+    return time.time()
 
 
-# =========================
-# مدیریت نشست و CSRF
-# =========================
+def client_ip(handler):
+    # Do not blindly trust X-Forwarded-For.
+    # Render sits behind a proxy, but this remains only an
+    # approximate identifier for rate limiting.
+    forwarded = handler.headers.get("X-Forwarded-For", "")
 
-def cookie_attributes(max_age=None):
-    attributes = [
-        "Path=/",
-        "HttpOnly",
-        "SameSite=Strict"
-    ]
+    if forwarded:
+        return forwarded.split(",")[0].strip()[:100]
 
-    if COOKIE_SECURE:
-        attributes.append("Secure")
-
-    if max_age is not None:
-        attributes.append(f"Max-Age={max_age}")
-
-    return "; ".join(attributes)
+    return handler.client_address[0]
 
 
-def parse_cookies(header):
-    cookies = {}
+def secure_compare(a, b):
+    if not isinstance(a, str):
+        a = str(a)
 
-    for part in (header or "").split(";"):
-        if "=" not in part:
-            continue
+    if not isinstance(b, str):
+        b = str(b)
 
-        name, value = part.strip().split("=", 1)
-        cookies[name] = value
+    return hmac.compare_digest(
+        a.encode("utf-8"),
+        b.encode("utf-8")
+    )
 
-    return cookies
+
+def password_ok(received, expected):
+    if not received or not expected:
+        return False
+
+    return secure_compare(received, expected)
+
+
+def cleanup_sessions():
+    current = now()
+
+    expired = []
+
+    for token, session in SESSIONS.items():
+        if current - session["created"] > SESSION_TTL:
+            expired.append(token)
+
+    for token in expired:
+        SESSIONS.pop(token, None)
+
+
+def create_session():
+    cleanup_sessions()
+
+    token = secrets.token_urlsafe(48)
+    csrf = secrets.token_urlsafe(32)
+
+    SESSIONS[token] = {
+        "csrf": csrf,
+        "created": now()
+    }
+
+    return token, csrf
+
+
+def destroy_session(token):
+    if token:
+        SESSIONS.pop(token, None)
+
+
+def get_cookie(handler, name):
+    raw = handler.headers.get("Cookie")
+
+    if not raw:
+        return None
+
+    jar = cookies.SimpleCookie()
+
+    try:
+        jar.load(raw)
+
+        if name in jar:
+            return jar[name].value
+
+    except Exception:
+        pass
+
+    return None
 
 
 def get_session(handler):
-    cookies = parse_cookies(
-        handler.headers.get("Cookie", "")
-    )
+    cleanup_sessions()
 
-    token = cookies.get(SESSION_COOKIE_NAME)
+    token = get_cookie(
+        handler,
+        "ghd_session"
+    )
 
     if not token:
         return None
@@ -76,104 +147,112 @@ def get_session(handler):
     if not session:
         return None
 
-    if session["expires_at"] <= time.time():
-        SESSIONS.pop(token, None)
+    if now() - session["created"] > SESSION_TTL:
+        destroy_session(token)
         return None
 
-    return {
-        "token": token,
-        **session
-    }
-
-
-def create_session():
-    session_token = secrets.token_urlsafe(32)
-    csrf_token = secrets.token_urlsafe(32)
-
-    SESSIONS[session_token] = {
-        "csrf_token": csrf_token,
-        "expires_at": time.time() + SESSION_TTL
-    }
-
-    return session_token, csrf_token
-
-
-def delete_session(token):
-    if token:
-        SESSIONS.pop(token, None)
+    return session
 
 
 def is_logged_in(handler):
     return get_session(handler) is not None
 
 
-def csrf_is_valid(handler, info):
+def valid_csrf(handler, supplied):
     session = get_session(handler)
 
     if not session:
         return False
 
-    submitted_token = info.get(
-        "csrf_token",
-        [""]
-    )[0]
+    if not supplied:
+        return False
 
-    cookie_token = parse_cookies(
-        handler.headers.get("Cookie", "")
-    ).get(CSRF_COOKIE_NAME, "")
-
-    expected_token = session["csrf_token"]
-
-    return (
-        bool(submitted_token)
-        and bool(cookie_token)
-        and hmac.compare_digest(submitted_token, expected_token)
-        and hmac.compare_digest(cookie_token, expected_token)
+    return secure_compare(
+        supplied,
+        session["csrf"]
     )
 
 
-def csrf_field(handler):
-    session = get_session(handler)
+# =========================================================
+# RATE LIMITING
+# =========================================================
 
-    if not session:
-        return ""
+def login_allowed(ip):
+    current = now()
 
-    return f"""
-<input
-type="hidden"
-name="csrf_token"
-value="{html.escape(session["csrf_token"])}"
->
-"""
+    info = LOGIN_ATTEMPTS.get(ip)
 
+    if not info:
+        return True
 
-def reject_request(handler, status=403, message="درخواست غیرمجاز است."):
-    handler.send_response(status)
-    handler.send_header("Content-Type", "text/html; charset=utf-8")
-    handler.send_header("Cache-Control", "no-store")
-    handler.end_headers()
-    handler.wfile.write(
-        error_page(message).encode("utf-8")
-    )
+    if current < info["locked_until"]:
+        return False
+
+    if current - info["first_attempt"] > LOGIN_WINDOW:
+        LOGIN_ATTEMPTS.pop(ip, None)
+        return True
+
+    return info["attempts"] < MAX_LOGIN_ATTEMPTS
 
 
-# =========================
-# اتصال به Supabase
-# =========================
+def login_failed(ip):
+    current = now()
 
-def supabase_request(method, url, data=None):
+    info = LOGIN_ATTEMPTS.get(ip)
+
+    if not info:
+        LOGIN_ATTEMPTS[ip] = {
+            "attempts": 1,
+            "first_attempt": current,
+            "locked_until": 0
+        }
+        return
+
+    if current - info["first_attempt"] > LOGIN_WINDOW:
+        LOGIN_ATTEMPTS[ip] = {
+            "attempts": 1,
+            "first_attempt": current,
+            "locked_until": 0
+        }
+        return
+
+    info["attempts"] += 1
+
+    if info["attempts"] >= MAX_LOGIN_ATTEMPTS:
+        info["locked_until"] = current + LOCK_TIME
+
+
+def login_success(ip):
+    LOGIN_ATTEMPTS.pop(ip, None)
+
+
+# =========================================================
+# SUPABASE
+# =========================================================
+
+def supabase_request(method, path, data=None):
+
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        print("Supabase configuration missing")
+        return None
+
+    url = SUPABASE_URL + path
 
     headers = {
-        "apikey": SUPABASE_SECRET_KEY,
-        "Authorization": "Bearer " + SUPABASE_SECRET_KEY,
+        "apikey": SUPABASE_KEY,
+        "Authorization": "Bearer " + SUPABASE_KEY,
         "Content-Type": "application/json",
-        "Prefer": "return=minimal"
+        "Accept": "application/json",
+        "Prefer": "return=representation"
     }
 
     body = None
 
     if data is not None:
-        body = json.dumps(data).encode("utf-8")
+        body = json.dumps(
+            data,
+            ensure_ascii=False
+        ).encode("utf-8")
 
     request = urllib.request.Request(
         url,
@@ -184,1331 +263,1041 @@ def supabase_request(method, url, data=None):
 
     try:
 
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with urllib.request.urlopen(
+            request,
+            timeout=15
+        ) as response:
 
-            text = response.read().decode("utf-8")
+            raw = response.read().decode(
+                "utf-8",
+                errors="replace"
+            )
 
-            if text:
-                return json.loads(text)
+            if not raw:
+                return []
 
-            return None
+            try:
+                return json.loads(raw)
 
-    except urllib.error.HTTPError as e:
+            except Exception:
+                return raw
 
-        error_body = e.read().decode(
-            "utf-8",
-            errors="replace"
+    except Exception as e:
+
+        print(
+            "Supabase request failed:",
+            type(e).__name__
         )
 
-        print("SUPABASE ERROR:", error_body)
-
-        raise Exception(
-            f"Supabase HTTP {e.code}: {error_body}"
-        )
+        return None
 
 
-# =========================
-# قالب اصلی سایت
-# =========================
+# =========================================================
+# GENERAL HELPERS
+# =========================================================
 
-def page(title, content):
+def escape(text):
 
-    return f"""
-<!DOCTYPE html>
+    if text is None:
+        return ""
 
-<html lang="fa" dir="rtl">
-
-<head>
-
-<meta charset="UTF-8">
-
-<meta name="viewport"
-content="width=device-width, initial-scale=1.0">
-
-<meta name="theme-color" content="#050816">
-
-<title>{html.escape(title)}</title>
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#039;")
+    )
 
 
-<style>
+def generate_tracking_code():
 
-/* =========================
-   Reset
-========================= */
+    return (
+        "GHD-"
+        + secrets.token_hex(5).upper()
+    )
 
-* {{
+
+def valid_tracking_code(code):
+
+    if not code:
+        return False
+
+    if len(code) > MAX_TRACKING_LENGTH:
+        return False
+
+    allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
+
+    return all(
+        char in allowed
+        for char in code
+    )
+
+
+def valid_report(report):
+
+    if not report:
+        return False
+
+    if len(report) > MAX_REPORT_LENGTH:
+        return False
+
+    return True
+
+
+# =========================================================
+# SECURITY HEADERS
+# =========================================================
+
+SECURITY_HEADERS = [
+
+    (
+        "X-Content-Type-Options",
+        "nosniff"
+    ),
+
+    (
+        "X-Frame-Options",
+        "DENY"
+    ),
+
+    (
+        "Referrer-Policy",
+        "no-referrer"
+    ),
+
+    (
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()"
+    ),
+
+    (
+        "Cross-Origin-Opener-Policy",
+        "same-origin"
+    ),
+
+    (
+        "Content-Security-Policy",
+        "default-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    ),
+
+    (
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains"
+    )
+]
+
+
+# =========================================================
+# CSS
+# =========================================================
+
+CSS = r"""
+* {
     box-sizing: border-box;
-}}
+}
 
-html {{
-    scroll-behavior: smooth;
-}}
+:root {
+    --bg:#050713;
+    --panel:rgba(15,21,43,.78);
+    --line:rgba(255,255,255,.09);
+    --text:#f7f8ff;
+    --muted:#9ba4c7;
+    --blue:#5b7cff;
+    --purple:#a45cff;
+    --cyan:#43ddff;
+    --green:#34d399;
+    --yellow:#fbbf24;
+    --red:#fb7185;
+}
 
-body {{
+html {
+    scroll-behavior:smooth;
+}
 
-    margin: 0;
-
-    min-height: 100vh;
+body {
+    margin:0;
+    min-height:100vh;
 
     font-family:
         Tahoma,
+        "Segoe UI",
         Arial,
         sans-serif;
 
-    color: #ffffff;
+    color:var(--text);
 
     background:
-
         radial-gradient(
-            circle at 10% 20%,
-            rgba(37,99,235,.22),
+            circle at 10% 10%,
+            rgba(91,124,255,.22),
+            transparent 32%
+        ),
+        radial-gradient(
+            circle at 90% 15%,
+            rgba(164,92,255,.18),
             transparent 30%
         ),
-
         radial-gradient(
-            circle at 90% 80%,
-            rgba(124,58,237,.22),
-            transparent 30%
+            circle at 50% 100%,
+            rgba(67,221,255,.08),
+            transparent 35%
         ),
+        var(--bg);
 
+    overflow-x:hidden;
+}
+
+body:before {
+    content:"";
+
+    position:fixed;
+    inset:0;
+
+    pointer-events:none;
+
+    background-image:
         linear-gradient(
-            135deg,
-            #020617,
-            #071127,
-            #0f172a
+            rgba(255,255,255,.025) 1px,
+            transparent 1px
+        ),
+        linear-gradient(
+            90deg,
+            rgba(255,255,255,.025) 1px,
+            transparent 1px
         );
 
-    overflow-x: hidden;
-}}
-
-
-/* =========================
-   Background
-========================= */
-
-body::before {{
-
-    content: "";
-
-    position: fixed;
-
-    width: 280px;
-    height: 280px;
-
-    border-radius: 50%;
-
-    background: rgba(59,130,246,.10);
-
-    filter: blur(70px);
-
-    top: -100px;
-    right: -80px;
-
-    pointer-events: none;
-}}
-
-body::after {{
-
-    content: "";
-
-    position: fixed;
-
-    width: 300px;
-    height: 300px;
-
-    border-radius: 50%;
-
-    background: rgba(168,85,247,.10);
-
-    filter: blur(80px);
-
-    bottom: -120px;
-    left: -100px;
-
-    pointer-events: none;
-}}
-
-
-/* =========================
-   Container
-========================= */
-
-.container {{
-
-    width: 94%;
-
-    max-width: 1050px;
-
-    margin: 35px auto;
-
-    position: relative;
-
-    z-index: 1;
-}}
-
-
-/* =========================
-   Card
-========================= */
-
-.card {{
-
-    background:
-        linear-gradient(
-            145deg,
-            rgba(30,41,59,.92),
-            rgba(15,23,42,.94)
-        );
-
-    border: 1px solid rgba(255,255,255,.08);
-
-    border-radius: 28px;
-
-    padding: 30px;
-
-    margin-bottom: 22px;
-
-    box-shadow:
-        0 25px 70px rgba(0,0,0,.35),
-        inset 0 1px 0 rgba(255,255,255,.04);
-
-    backdrop-filter: blur(16px);
-
-    animation: cardIn .45s ease;
-}}
-
-@keyframes cardIn {{
-
-    from {{
-        opacity: 0;
-        transform: translateY(15px);
-    }}
-
-    to {{
-        opacity: 1;
-        transform: translateY(0);
-    }}
-}}
-
-
-/* =========================
-   Header
-========================= */
-
-.logo-box {{
-
-    width: 82px;
-    height: 82px;
-
-    margin: 0 auto 18px;
-
-    border-radius: 24px;
-
-    display: flex;
-
-    align-items: center;
-
-    justify-content: center;
-
-    font-size: 42px;
-
-    background:
-
-        linear-gradient(
-            135deg,
-            #2563eb,
-            #7c3aed
-        );
-
-    box-shadow:
-        0 15px 35px rgba(37,99,235,.30);
-
-}}
-
-h1 {{
-
-    text-align: center;
-
-    font-size: 30px;
-
-    margin: 5px 0 10px;
-
-}}
-
-h2 {{
-
-    margin-top: 0;
-
-}}
-
-.subtitle {{
-
-    text-align: center;
-
-    color: #94a3b8;
-
-    font-size: 15px;
-
-    line-height: 1.8;
-
-    margin-bottom: 28px;
-}}
-
-
-/* =========================
-   Inputs
-========================= */
-
+    background-size:45px 45px;
+}
+
+a {
+    color:inherit;
+    text-decoration:none;
+}
+
+button,
 input,
 textarea,
-select {{
+select {
+    font:inherit;
+}
 
-    width: 100%;
+button {
+    cursor:pointer;
+}
 
-    border: 1px solid rgba(255,255,255,.08);
+.container {
+    width:min(1180px,calc(100% - 32px));
+    margin:auto;
+}
 
-    outline: none;
+.nav {
+    position:sticky;
+    top:0;
+    z-index:100;
 
-    border-radius: 16px;
+    backdrop-filter:blur(22px);
+    -webkit-backdrop-filter:blur(22px);
 
-    padding: 15px 17px;
+    background:rgba(5,7,19,.72);
 
-    font-size: 16px;
+    border-bottom:1px solid var(--line);
+}
 
-    background: rgba(51,65,85,.75);
+.nav-inner {
+    max-width:1180px;
+    margin:auto;
 
-    color: white;
+    padding:17px 18px;
 
-    margin-bottom: 13px;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+}
 
-    font-family:
-        Tahoma,
-        Arial,
-        sans-serif;
+.brand {
+    display:flex;
+    align-items:center;
+    gap:12px;
 
-    transition: .2s;
-}}
+    font-size:19px;
+    font-weight:900;
+}
 
-input:focus,
-textarea:focus,
-select:focus {{
+.logo {
+    width:44px;
+    height:44px;
 
-    border-color: #3b82f6;
+    display:grid;
+    place-items:center;
 
-    box-shadow:
-        0 0 0 3px rgba(59,130,246,.15);
-}}
-
-textarea {{
-
-    min-height: 190px;
-
-    resize: vertical;
-
-    line-height: 1.8;
-}}
-
-input::placeholder,
-textarea::placeholder {{
-
-    color: #94a3b8;
-}}
-
-
-/* =========================
-   Buttons
-========================= */
-
-button {{
-
-    width: 100%;
-
-    border: none;
-
-    border-radius: 16px;
-
-    padding: 15px;
-
-    margin-top: 7px;
-
-    font-size: 16px;
-
-    font-weight: bold;
-
-    cursor: pointer;
-
-    color: white;
+    border-radius:14px;
 
     background:
         linear-gradient(
             135deg,
-            #2563eb,
-            #4f46e5
+            var(--blue),
+            var(--purple)
         );
 
     box-shadow:
-        0 10px 25px rgba(37,99,235,.20);
+        0 0 30px rgba(91,124,255,.38);
+}
 
-    transition:
-        transform .2s,
-        box-shadow .2s,
-        filter .2s;
-}}
+.logo svg {
+    width:25px;
+    height:25px;
+}
 
-button:hover {{
+.nav-links {
+    display:flex;
+    gap:6px;
+}
 
-    transform: translateY(-2px);
+.nav-link {
+    padding:10px 13px;
+    border-radius:12px;
 
-    filter: brightness(1.08);
+    color:var(--muted);
+
+    transition:.2s;
+}
+
+.nav-link:hover {
+    color:white;
+    background:rgba(255,255,255,.06);
+}
+
+.hero {
+    min-height:640px;
+
+    display:flex;
+    align-items:center;
+
+    padding:75px 0;
+}
+
+.hero-grid {
+    display:grid;
+    grid-template-columns:1.15fr .85fr;
+
+    align-items:center;
+
+    gap:60px;
+}
+
+.badge {
+    display:inline-flex;
+    align-items:center;
+    gap:8px;
+
+    padding:8px 13px;
+
+    border:1px solid rgba(91,124,255,.3);
+    border-radius:999px;
+
+    background:rgba(91,124,255,.08);
+
+    color:#ccd5ff;
+
+    font-size:13px;
+    font-weight:800;
+}
+
+.badge-dot {
+    width:7px;
+    height:7px;
+
+    border-radius:50%;
+
+    background:var(--cyan);
 
     box-shadow:
-        0 15px 30px rgba(37,99,235,.28);
-}}
+        0 0 12px var(--cyan);
+}
 
-button:active {{
+.hero h1 {
+    margin:23px 0 18px;
 
-    transform: translateY(0);
-}}
+    font-size:clamp(48px,7vw,86px);
 
-.delete {{
+    line-height:.98;
+
+    letter-spacing:-4px;
+}
+
+.gradient-text {
+    background:
+        linear-gradient(
+            90deg,
+            white,
+            #9eb1ff,
+            #ca8cff
+        );
+
+    -webkit-background-clip:text;
+    background-clip:text;
+
+    color:transparent;
+}
+
+.hero p {
+    max-width:650px;
+
+    color:var(--muted);
+
+    font-size:18px;
+    line-height:1.9;
+}
+
+.actions {
+    display:flex;
+    flex-wrap:wrap;
+    gap:12px;
+
+    margin-top:30px;
+}
+
+.btn {
+    min-height:52px;
+
+    padding:0 22px;
+
+    border-radius:15px;
+
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    gap:8px;
+
+    border:1px solid transparent;
+
+    font-weight:900;
+
+    transition:.22s;
+}
+
+.btn:hover {
+    transform:translateY(-3px);
+}
+
+.btn-primary {
+    color:white;
 
     background:
         linear-gradient(
             135deg,
-            #dc2626,
-            #991b1b
-        );
-}}
-
-.status-button {{
-
-    background:
-        linear-gradient(
-            135deg,
-            #059669,
-            #047857
-        );
-}}
-
-.logout {{
-
-    background:
-        linear-gradient(
-            135deg,
-            #475569,
-            #334155
-        );
-}}
-
-
-/* =========================
-   Links
-========================= */
-
-.back {{
-
-    display: block;
-
-    text-align: center;
-
-    color: #93c5fd;
-
-    text-decoration: none;
-
-    margin-top: 17px;
-
-    transition: .2s;
-}}
-
-.back:hover {{
-
-    color: white;
-
-    transform: translateY(-1px);
-}}
-
-
-/* =========================
-   Feature Cards
-========================= */
-
-.features {{
-
-    display: grid;
-
-    grid-template-columns:
-        repeat(3, 1fr);
-
-    gap: 13px;
-
-    margin-top: 25px;
-}}
-
-.feature {{
-
-    padding: 18px;
-
-    border-radius: 18px;
-
-    background:
-        rgba(51,65,85,.48);
-
-    border:
-        1px solid rgba(255,255,255,.06);
-
-    text-align: center;
-}}
-
-.feature-icon {{
-
-    font-size: 27px;
-
-    margin-bottom: 7px;
-}}
-
-.feature-title {{
-
-    font-weight: bold;
-
-    margin-bottom: 5px;
-}}
-
-.feature-text {{
-
-    color: #94a3b8;
-
-    font-size: 12px;
-
-    line-height: 1.6;
-}}
-
-
-/* =========================
-   Success / Error
-========================= */
-
-.success {{
-
-    background:
-        linear-gradient(
-            135deg,
-            rgba(22,101,52,.85),
-            rgba(21,128,61,.55)
+            #5878ff,
+            #a056ff
         );
 
-    border:
-        1px solid rgba(74,222,128,.20);
+    box-shadow:
+        0 15px 40px rgba(91,124,255,.27);
+}
 
-    padding: 24px;
+.btn-primary:hover {
+    box-shadow:
+        0 18px 50px rgba(91,124,255,.42);
+}
 
-    border-radius: 20px;
+.btn-secondary {
+    color:#e9ecff;
 
-    text-align: center;
-}}
+    border-color:var(--line);
 
-.error {{
+    background:rgba(255,255,255,.05);
+}
+
+.hero-visual {
+    min-height:420px;
+
+    display:grid;
+    place-items:center;
+
+    position:relative;
+}
+
+.orbit {
+    position:absolute;
+
+    width:350px;
+    height:350px;
+
+    border:1px solid rgba(91,124,255,.18);
+
+    border-radius:50%;
+
+    animation:spin 18s linear infinite;
+}
+
+.orbit:before,
+.orbit:after {
+    content:"";
+
+    position:absolute;
+
+    width:11px;
+    height:11px;
+
+    border-radius:50%;
+
+    background:var(--cyan);
+
+    box-shadow:
+        0 0 15px var(--cyan),
+        0 0 30px var(--cyan);
+}
+
+.orbit:before {
+    top:25px;
+    left:50%;
+}
+
+.orbit:after {
+    right:15px;
+    bottom:50px;
+
+    background:var(--purple);
+
+    box-shadow:
+        0 0 15px var(--purple),
+        0 0 30px var(--purple);
+}
+
+@keyframes spin {
+    to {
+        transform:rotate(360deg);
+    }
+}
+
+.glow-core {
+    width:260px;
+    height:260px;
+
+    display:grid;
+    place-items:center;
+
+    border-radius:50%;
 
     background:
-        linear-gradient(
-            135deg,
-            rgba(153,27,27,.85),
-            rgba(127,29,29,.60)
+        radial-gradient(
+            circle,
+            rgba(91,124,255,.3),
+            rgba(164,92,255,.08),
+            transparent 70%
         );
+}
 
-    border:
-        1px solid rgba(248,113,113,.20);
+.big-logo {
+    width:155px;
+    height:155px;
 
-    padding: 20px;
+    display:grid;
+    place-items:center;
 
-    border-radius: 18px;
-
-    text-align: center;
-
-    word-break: break-word;
-}}
-
-
-/* =========================
-   Report
-========================= */
-
-.report {{
+    border-radius:42px;
 
     background:
         linear-gradient(
             145deg,
-            rgba(51,65,85,.82),
-            rgba(30,41,59,.82)
+            rgba(91,124,255,.95),
+            rgba(164,92,255,.9)
         );
 
-    border:
-        1px solid rgba(255,255,255,.07);
+    box-shadow:
+        0 0 65px rgba(91,124,255,.4),
+        0 30px 90px rgba(0,0,0,.4);
 
-    border-radius: 21px;
+    animation:float 4s ease-in-out infinite;
+}
 
-    padding: 21px;
+.big-logo svg {
+    width:85px;
+    height:85px;
+}
 
-    margin-bottom: 16px;
+@keyframes float {
+    0%,100% {
+        transform:translateY(0);
+    }
 
-    transition: .2s;
-}}
+    50% {
+        transform:translateY(-12px);
+    }
+}
 
-.report:hover {{
+.section {
+    padding:70px 0;
+}
 
-    transform: translateY(-2px);
+.section-head {
+    text-align:center;
+    margin-bottom:35px;
+}
+
+.section-head h2 {
+    font-size:38px;
+    margin:12px 0;
+}
+
+.section-head p {
+    max-width:650px;
+    margin:auto;
+
+    color:var(--muted);
+
+    line-height:1.8;
+}
+
+.feature-grid {
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    gap:17px;
+}
+
+.feature {
+    padding:27px;
+
+    min-height:215px;
+
+    border:1px solid var(--line);
+    border-radius:24px;
+
+    background:
+        linear-gradient(
+            145deg,
+            rgba(255,255,255,.07),
+            rgba(255,255,255,.025)
+        );
+
+    backdrop-filter:blur(15px);
+
+    transition:.25s;
+}
+
+.feature:hover {
+    transform:translateY(-7px);
 
     border-color:
-        rgba(96,165,250,.25);
-}}
+        rgba(91,124,255,.35);
 
-.report-text {{
+    box-shadow:
+        0 25px 60px rgba(0,0,0,.25);
+}
 
-    white-space: pre-wrap;
+.feature-icon {
+    width:54px;
+    height:54px;
 
-    line-height: 2;
+    display:grid;
+    place-items:center;
 
-    margin: 15px 0;
-
-    color: #f8fafc;
-}}
-
-.date {{
-
-    color: #94a3b8;
-
-    font-size: 12px;
-
-    margin-top: 10px;
-}}
-
-
-/* =========================
-   Tracking Code
-========================= */
-
-.code {{
+    border-radius:16px;
 
     background:
-        rgba(2,6,23,.75);
+        rgba(91,124,255,.13);
 
-    border:
-        1px solid rgba(96,165,250,.15);
+    border:1px solid rgba(91,124,255,.2);
 
-    border-radius: 14px;
+    font-size:24px;
+}
 
-    padding: 14px;
+.feature h3 {
+    margin:20px 0 9px;
+}
 
-    text-align: center;
+.feature p {
+    color:var(--muted);
+    line-height:1.8;
+}
 
-    font-weight: bold;
+.form-wrap {
+    max-width:760px;
+    margin:65px auto;
+}
 
-    letter-spacing: 1.5px;
+.panel {
+    padding:31px;
 
-    margin: 13px 0;
-
-    color: #bfdbfe;
-}}
-
-
-/* =========================
-   Badge
-========================= */
-
-.badge {{
-
-    display: inline-block;
-
-    padding: 7px 13px;
-
-    border-radius: 999px;
-
-    background:
-        rgba(37,99,235,.20);
-
-    border:
-        1px solid rgba(96,165,250,.18);
-
-    color: #bfdbfe;
-
-    margin-bottom: 8px;
-
-    font-size: 13px;
-}}
-
-
-/* =========================
-   Stats
-========================= */
-
-.stats {{
-
-    display: grid;
-
-    grid-template-columns:
-        repeat(3, 1fr);
-
-    gap: 13px;
-
-    margin-bottom: 22px;
-}}
-
-.stat {{
+    border:1px solid var(--line);
+    border-radius:28px;
 
     background:
         linear-gradient(
             145deg,
-            rgba(51,65,85,.70),
-            rgba(30,41,59,.70)
+            rgba(18,25,51,.9),
+            rgba(8,12,27,.9)
         );
 
-    border-radius: 18px;
+    box-shadow:
+        0 30px 100px rgba(0,0,0,.28);
 
-    padding: 18px;
+    backdrop-filter:blur(20px);
+}
 
-    text-align: center;
+.panel-title {
+    margin-bottom:25px;
+}
 
-    border:
-        1px solid rgba(255,255,255,.06);
-}}
+.panel-title h2 {
+    margin:17px 0 8px;
 
-.stat-number {{
+    font-size:30px;
+}
 
-    font-size: 30px;
+.panel-title p {
+    margin:0;
+    color:var(--muted);
+}
 
-    font-weight: bold;
+.field {
+    margin-bottom:18px;
+}
 
-    margin-bottom: 5px;
+.field label {
+    display:block;
 
-    color: #bfdbfe;
-}}
+    margin-bottom:8px;
 
+    color:#e2e6ff;
 
-/* =========================
-   Search
-========================= */
+    font-size:14px;
+    font-weight:800;
+}
 
-.search-box {{
+.input,
+.textarea,
+.select {
+    width:100%;
 
-    margin-bottom: 22px;
-}}
+    padding:15px 16px;
 
+    outline:none;
 
-/* =========================
-   Responsive
-========================= */
+    color:white;
 
-@media(max-width:700px) {{
+    border:1px solid rgba(255,255,255,.1);
+    border-radius:14px;
 
-    .container {{
-        width: 92%;
-        margin: 20px auto;
-    }}
+    background:
+        rgba(255,255,255,.045);
 
-    .card {{
-        padding: 20px;
-        border-radius: 22px;
-    }}
+    transition:.2s;
+}
 
-    h1 {{
-        font-size: 25px;
-    }}
+.input:focus,
+.textarea:focus,
+.select:focus {
+    border-color:rgba(91,124,255,.75);
 
-    .features {{
-        grid-template-columns: 1fr;
-    }}
+    box-shadow:
+        0 0 0 4px rgba(91,124,255,.09);
+}
 
-    .stats {{
-        grid-template-columns: 1fr;
-    }}
+.textarea {
+    min-height:180px;
+    resize:vertical;
+}
 
-    textarea {{
-        min-height: 160px;
-    }}
-}}
+.submit {
+    width:100%;
+    border:0;
+}
 
-</style>
+.track-box {
+    max-width:700px;
 
-</head>
+    margin:75px auto;
 
+    text-align:center;
+}
 
-<body>
+.track-code {
+    margin:25px 0;
 
-<div class="container">
+    padding:24px;
 
-{content}
+    border:1px solid rgba(67,221,255,.2);
+    border-radius:20px;
 
-</div>
+    background:
+        linear-gradient(
+            135deg,
+            rgba(67,221,255,.07),
+            rgba(91,124,255,.08)
+        );
 
-</body>
+    color:#e9fcff;
 
-</html>
-"""
+    font-size:31px;
+    font-weight:1000;
 
+    letter-spacing:3px;
 
-# =========================
-# صفحه اصلی
-# =========================
+    overflow-wrap:anywhere;
+}
 
-def main_page():
+.status {
+    display:inline-flex;
 
-    return page(
-        "سامانه غدیر",
-        """
+    padding:8px 13px;
 
-<div class="card">
+    border-radius:999px;
 
-<div class="logo-box">
-🛡️
-</div>
+    font-size:13px;
+    font-weight:900;
+}
 
-<h1>
-سامانه غدیر
-</h1>
+.status-new {
+    background:rgba(91,124,255,.13);
+    color:#b1c0ff;
+}
 
-<div class="subtitle">
+.status-progress {
+    background:rgba(251,191,36,.12);
+    color:#fcd34d;
+}
 
-سامانه ثبت و پیگیری گزارش‌ها
+.status-done {
+    background:rgba(52,211,153,.12);
+    color:#6ee7b7;
+}
 
-<br>
+.admin-top {
+    padding:50px 0 25px;
+}
 
-گزارش خود را ثبت کنید و با کد پیگیری
-وضعیت آن را مشاهده کنید.
+.admin-top h1 {
+    margin:20px 0 7px;
+    font-size:40px;
+}
 
-</div>
+.admin-top p {
+    color:var(--muted);
+}
 
+.stats {
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    gap:15px;
 
-<form method="POST" action="/report">
+    margin:20px 0;
+}
 
-<input
-type="password"
-name="report_password"
-placeholder="🔐 رمز ثبت گزارش"
-required
->
+.stat {
+    padding:22px;
 
-<textarea
-name="report"
-placeholder="✍️ گزارش خود را اینجا بنویسید..."
-required
-></textarea>
+    border:1px solid var(--line);
+    border-radius:20px;
 
-<button type="submit">
-🚀 ثبت گزارش
-</button>
+    background:var(--panel);
+}
 
-</form>
+.stat-label {
+    color:var(--muted);
+    font-size:13px;
+}
 
+.stat-number {
+    margin-top:9px;
+    font-size:35px;
+    font-weight:1000;
+}
 
-<div class="features">
+.toolbar {
+    display:flex;
+    flex-wrap:wrap;
+    gap:10px;
 
-<div class="feature">
+    margin:22px 0;
+}
 
-<div class="feature-icon">
-🔐
-</div>
+.toolbar .input,
+.toolbar .select {
+    flex:1;
+    min-width:190px;
+}
 
-<div class="feature-title">
-محافظت‌شده
-</div>
+.report-list {
+    display:grid;
+    gap:15px;
+}
 
-<div class="feature-text">
-ثبت گزارش با رمز ورود
-</div>
+.report {
+    padding:23px;
 
-</div>
+    border:1px solid var(--line);
+    border-radius:21px;
 
+    background:rgba(15,20,39,.8);
 
-<div class="feature">
+    transition:.2s;
+}
 
-<div class="feature-icon">
-🎫
-</div>
+.report:hover {
+    transform:translateY(-2px);
 
-<div class="feature-title">
-کد پیگیری
-</div>
+    border-color:
+        rgba(91,124,255,.3);
+}
 
-<div class="feature-text">
-هر گزارش دارای کد اختصاصی
-</div>
+.report-head {
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
 
-</div>
+    gap:15px;
 
+    margin-bottom:15px;
+}
 
-<div class="feature">
+.report-code {
+    color:#aebdff;
+    font-weight:1000;
+}
 
-<div class="feature-icon">
-🔎
-</div>
+.report-date {
+    color:var(--muted);
+    font-size:12px;
+    margin-top:5px;
+}
 
-<div class="feature-title">
-پیگیری آنلاین
-</div>
+.report-text {
+    color:#e4e8fb;
 
-<div class="feature-text">
-مشاهده وضعیت گزارش
-</div>
+    line-height:1.9;
 
-</div>
+    white-space:pre-wrap;
+    word-break:break-word;
+}
 
-</div>
+.report-actions {
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
 
+    margin-top:18px;
+}
 
-<a class="back" href="/track">
-🔎 پیگیری گزارش
-</a>
+.small-btn {
+    padding:9px 13px;
 
-<a class="back" href="/admin">
-🔐 ورود مدیریت
-</a>
+    border:1px solid var(--line);
+    border-radius:11px;
 
-</div>
+    color:white;
 
-"""
-    )
+    background:rgba(255,255,255,.05);
+}
 
+.small-btn:hover {
+    background:rgba(255,255,255,.1);
+}
 
-# =========================
-# صفحه موفقیت
-# =========================
+.danger {
+    color:#fda4af;
+}
 
-def success_page(code):
+.login-page {
+    min-height:calc(100vh - 80px);
 
-    return page(
-        "گزارش ثبت شد",
-        f"""
+    display:grid;
+    place-items:center;
 
-<div class="card">
+    padding:40px 0;
+}
 
-<div class="success">
+.login-box {
+    width:min(440px,100%);
+    text-align:center;
+}
 
-<div style="font-size:50px;">
-✅
-</div>
+.login-logo {
+    margin:0 auto 20px;
+}
 
-<h2>
-گزارش با موفقیت ثبت شد
-</h2>
+.footer {
+    margin-top:50px;
+    padding:45px 0;
 
-<p>
-گزارش شما ذخیره شد.
-</p>
+    border-top:1px solid var(--line);
 
+    color:var(--muted);
 
-<div class="code">
+    text-align:center;
+}
 
-کد پیگیری
+.fade {
+    animation:fade .6s ease both;
+}
 
-<br><br>
+@keyframes fade {
+    from {
+        opacity:0;
+        transform:translateY(15px);
+    }
 
-<span style="font-size:22px;">
-{html.escape(code)}
-</span>
+    to {
+        opacity:1;
+        transform:translateY(0);
+    }
+}
 
-</div>
+@media(max-width:850px) {
 
+    .nav-links {
+        display:none;
+    }
 
-<p style="color:#bbf7d0;">
-این کد را برای پیگیری گزارش نگه دارید.
-</p>
+    .container {
+        width:min(100% - 22px,650px);
+    }
 
-</div>
+    .hero {
+        padding:60px 0 30px;
+    }
 
+    .hero-grid {
+        grid-template-columns:1fr;
+        gap:10px;
+    }
 
-<a class="back" href="/track">
-🔎 پیگیری گزارش
-</a>
+    .hero h1 {
+        font-size:53px;
+    }
 
-<a class="back" href="/">
-🏠 بازگشت به صفحه اصلی
-</a>
+    .hero p {
+        font-size:16px;
+    }
 
-</div>
+    .hero-visual {
+        min-height:350px;
+    }
 
-"""
-    )
+    .orbit {
+        width:280px;
+        height:280px;
+    }
 
+    .big-logo {
+        width:125px;
+        height:125px;
+        border-radius:34px;
+    }
 
-# =========================
-# صفحه خطا
-# =========================
+    .big-logo svg {
+        width:68px;
+        height:68px;
+    }
 
-def error_page(error_text):
-
-    return page(
-        "خطا",
-        f"""
-
-<div class="card">
-
-<div class="error">
-
-<div style="font-size:45px;">
-❌
-</div>
-
-<h2>
-عملیات ناموفق بود
-</h2>
-
-<p>
-{html.escape(str(error_text))}
-</p>
-
-</div>
-
-
-<a class="back" href="/">
-🏠 بازگشت
-</a>
-
-</div>
-
-"""
-    )
-
-
-# =========================
-# صفحه ورود مدیریت
-# =========================
-
-def admin_login_page():
-
-    return page(
-        "ورود مدیریت",
-        """
-
-<div class="card">
-
-<div class="logo-box">
-🔐
-</div>
-
-<h1>
-ورود مدیریت
-</h1>
-
-<div class="subtitle">
-برای ورود به پنل مدیریت رمز خود را وارد کنید.
-</div>
-
-
-<form method="POST" action="/login">
-
-<input
-type="password"
-name="password"
-placeholder="🔑 رمز مدیریت"
-required
->
-
-<button type="submit">
-🚪 ورود به پنل
-</button>
-
-</form>
-
-
-<a class="back" href="/">
-🏠 بازگشت
-</a>
-
-</div>
-
-"""
-    )
-
-
-# =========================
-# پنل گزارش‌ها
-# =========================
-
-def reports_page(search="", csrf_token=""):
-
-    url = (
-
-        SUPABASE_URL
-
-        + "/rest/v1/reports"
-
-        + "?select=id,created_at,report,tracking_code,status"
-
-        + "&order=created_at.desc"
-
-    )
-
-
-    reports = supabase_request(
-        "GET",
-        url
-    )
-
-
-    search = search.strip().lower()
-
-
-    if search:
-
-        reports = [
-
-            item
-
-            for item in reports
-
-            if
-
-            search in str(
-                item.get(
-                    "report",
-                    ""
-                )
-            ).lower()
-
-            or
-
-            search in str(
-                item.get(
-                    "tracking_code",
-                    ""
-                )
-            ).lower()
-
-            or
-
-            search in str(
-                item.get(
-                    "status",
-                    ""
-                )
-            ).lower()
-
-        ]
-
-
-    total = len(reports)
-
-
-    new_count = sum(
-
-        1
-
-        for x in reports
-
-        if x.get(
-            "status",
-            "جدید"
-        ) == "جدید"
-
-    )
-
-
-    checking_count = sum(
-
-        1
-
-        for x in reports
-
-        if x.get(
-            "status",
-            ""
-        ) == "در حال بررسی"
-
-    )
-
-
-    checked_count = sum(
-
-        1
-
-        for x in reports
-
-        if x.get(
-            "status",
-            ""
-        ) == "بررسی‌شده"
-
-    )
-
-
-    reports_html = ""
-
-
-    for item in reports:
-
-        report_id = str(
-            item.get(
-                "id",
-                ""
-            )
-        )
-
-
-        report_text = html.escape(
-            str(
-                item.get(
-                    "report",
-                    ""
-                )
-            )
-        )
-
-
-        created_at = html.escape(
-            str(
-                item.get(
-                    "created_at",
-                    ""
-                )
-            )
-        )
-
-
-        tracking_code = html.escape(
-            str(
-                item.get(
-                    "tracking_code",
-                    ""
-                )
-            )
-        )
-
-
-        if not tracking_code:
-
-            tracking_code = (
-                "GHD-"
-                + report_id
-            )
-
-
-        status = html.escape(
-            str(
-                item.get(
-                    "status",
-                    "جدید"
-                )
-            )
-        )
-
-
-        reports_html += f"""
-
-<div class="report">
-
-<div class="badge">
-📌 وضعیت: {status}
-</div>
-
-
-<div class="code">
-
-🎫 کد پیگیری
-
-<br>
-
-{tracking_code}
-
-</div>
-
-
-<div class="report-text">
-{report_text}
-</div>
-
-
-<div class="date">
-
-🕐 زمان ثبت:
-
-{created_at}
-
-</div>
-
-
-<form
-method="POST"
-action="/status"
->
-
-<input
-type="hidden"
-name="id"
-value="{html.escape(report_id)}"
->
-
-<input
-type="hidden"
-name="csrf_token"
-value="{html.escape(csrf_token)}"
->
-
-
-<select name="status">
-
-<option value="جدید">
-جدید
-</option>
-
-<option value="در حال بررسی">
-در حال بررسی
-</option>
-
-<option value="بررسی‌شده">
-بررسی‌شده
-</option>
-
-</select>
-
-
-<button
-class="status-button"
-type="submit"
->
-
-💾 تغییر وضعیت
-
-</button>
-
-</form>
-
-
-<form
-method="POST"
-action="/delete"
->
-
-<input
-type="hidden"
-name="id"
-value="{html.escape(report_id)}"
->
-
-<input
-type="hidden"
-name="csrf_token"
-value="{html.escape(csrf_token)}"
->
-
-
-<button
-class="delete"
-type="submit"
->
-
-🗑️ حذف گزارش
-
-</button>
-
-</form>
-
-</div>
-
-"""
-
-
-    if not reports_html:
-
-        reports_html = """
-
-<div class="card"
-style="text-align:center;color:#94a
+    .feature-grid,
+    .stats {
+        gri
