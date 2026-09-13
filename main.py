@@ -244,7 +244,7 @@ def main_page():
     content = """
 <div class="card">
 
-<h1>📝 سامانه گزارش امن</h1>
+<h1>📝 سامانه غدیر</h1>
 
 <form method="POST" action="/report">
 
