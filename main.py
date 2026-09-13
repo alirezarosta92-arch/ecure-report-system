@@ -43,16 +43,10 @@ def supabase_request(method, url, data=None):
         return None
 
 
-# =========================
-# صفحه اصلی
-# =========================
-
 صفحه_اصلی = """
 <!DOCTYPE html>
 <html lang="fa">
-
 <head>
-
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 
@@ -184,8 +178,6 @@ button{
 
     box-shadow:
     0 8px 25px rgba(79,140,255,0.3);
-
-    transition:0.2s;
 }
 
 button:active{
@@ -194,30 +186,21 @@ button:active{
 
 .admin{
     display:block;
-
     text-align:center;
-
     margin-top:22px;
-
     color:#bfdbfe;
-
     text-decoration:none;
-
     font-size:14px;
 }
 
 .footer{
     text-align:center;
-
     margin-top:18px;
-
     color:#94a3b8;
-
     font-size:12px;
 }
 
 </style>
-
 </head>
 
 <body>
@@ -235,7 +218,7 @@ button:active{
 </h1>
 
 <div class="subtitle">
-گزارش خود را با خیال راحت ثبت کنید
+گزارش خود را ثبت کنید
 </div>
 
 <form method="POST" action="/report">
@@ -265,14 +248,9 @@ required
 </div>
 
 </body>
-
 </html>
 """
 
-
-# =========================
-# صفحه مدیریت
-# =========================
 
 def صفحه_مدیریت():
 
@@ -350,7 +328,7 @@ def صفحه_مدیریت():
             <div class="report">
 
                 <div class="report-title">
-                    <span>📄 گزارش {شماره}</span>
+                    📄 گزارش {شماره}
                 </div>
 
                 <div class="report-text">
@@ -410,9 +388,6 @@ def صفحه_مدیریت():
         padding:25px;
         border-radius:22px;
         margin-bottom:20px;
-
-        box-shadow:
-        0 15px 40px rgba(0,0,0,0.3);
     }}
 
     .header h1{{
@@ -506,10 +481,6 @@ def صفحه_مدیریت():
     """
 
 
-# =========================
-# سرور
-# =========================
-
 class Server(BaseHTTPRequestHandler):
 
     def do_GET(self):
@@ -521,7 +492,6 @@ class Server(BaseHTTPRequestHandler):
             )
 
             return
-
 
         if self.path == "/admin":
 
@@ -673,7 +643,6 @@ class Server(BaseHTTPRequestHandler):
 
             return
 
-
         if self.path == "/reports":
 
             cookie = self.headers.get(
@@ -701,15 +670,9 @@ class Server(BaseHTTPRequestHandler):
 
             return
 
-
         self.send_response(404)
-
         self.end_headers()
 
-
-    # =========================
-    # POST
-    # =========================
 
     def do_POST(self):
 
@@ -810,7 +773,7 @@ class Server(BaseHTTPRequestHandler):
                 </h2>
 
                 <p style="color:#94a3b8">
-                گزارش شما با موفقیت در سامانه ذخیره شد.
+                گزارش شما با موفقیت ذخیره شد.
                 </p>
 
                 <a
@@ -926,7 +889,6 @@ class Server(BaseHTTPRequestHandler):
 
 
         self.send_response(404)
-
         self.end_headers()
 
 
