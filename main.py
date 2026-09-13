@@ -1,5 +1,5 @@
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, quote
 import urllib.request
 import urllib.error
 import json
@@ -24,10 +24,11 @@ SESSION_TOKEN = secrets.token_urlsafe(32)
 
 
 # =========================
-# ارتباط با Supabase
+# Supabase
 # =========================
 
 def supabase_request(method, url, data=None):
+
     headers = {
         "apikey": SUPABASE_SECRET_KEY,
         "Authorization": "Bearer " + SUPABASE_SECRET_KEY,
@@ -48,7 +49,12 @@ def supabase_request(method, url, data=None):
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:
+
+        with urllib.request.urlopen(
+            request,
+            timeout=15
+        ) as response:
+
             text = response.read().decode("utf-8")
 
             if text:
@@ -57,21 +63,17 @@ def supabase_request(method, url, data=None):
             return None
 
     except urllib.error.HTTPError as e:
+
         error_body = e.read().decode(
             "utf-8",
             errors="replace"
         )
 
-        print("SUPABASE HTTP ERROR:", e.code)
-        print("SUPABASE ERROR BODY:", error_body)
+        print("SUPABASE ERROR:", error_body)
 
         raise Exception(
             f"Supabase HTTP {e.code}: {error_body}"
         )
-
-    except Exception as e:
-        print("SUPABASE ERROR:", repr(e))
-        raise
 
 
 # =========================
@@ -82,6 +84,7 @@ def page(title, content):
 
     return f"""
 <!DOCTYPE html>
+
 <html lang="fa" dir="rtl">
 
 <head>
@@ -96,309 +99,299 @@ content="width=device-width, initial-scale=1.0">
 <style>
 
 * {{
-    box-sizing: border-box;
+box-sizing:border-box;
 }}
 
 body {{
 
-    margin: 0;
+margin:0;
 
-    font-family:
-    Tahoma,
-    Arial,
-    sans-serif;
+font-family:
+Tahoma,
+Arial,
+sans-serif;
 
-    background:
-    linear-gradient(
-        135deg,
-        #020617,
-        #0f172a,
-        #172554
-    );
+background:
+linear-gradient(
+135deg,
+#020617,
+#0f172a,
+#172554
+);
 
-    color: white;
+color:white;
 
-    min-height: 100vh;
+min-height:100vh;
+
 }}
 
 .container {{
 
-    width: 94%;
+width:94%;
 
-    max-width: 900px;
+max-width:900px;
 
-    margin:
-    30px auto;
+margin:30px auto;
+
 }}
 
 .card {{
 
-    background:
-    rgba(30,41,59,.95);
+background:
+rgba(30,41,59,.95);
 
-    border-radius: 22px;
+border-radius:22px;
 
-    padding: 24px;
+padding:24px;
 
-    margin-bottom: 20px;
+margin-bottom:20px;
 
-    box-shadow:
-    0 15px 40px
-    rgba(0,0,0,.35);
+box-shadow:
+0 15px 40px
+rgba(0,0,0,.35);
+
 }}
 
 h1 {{
 
-    text-align: center;
+text-align:center;
 
-    margin-top: 5px;
+margin-bottom:25px;
 
-    margin-bottom: 25px;
-}}
-
-h2 {{
-
-    margin-top: 5px;
 }}
 
 input,
 textarea,
 select {{
 
-    width: 100%;
+width:100%;
 
-    border: none;
+border:none;
 
-    outline: none;
+outline:none;
 
-    border-radius: 13px;
+border-radius:13px;
 
-    padding: 14px;
+padding:14px;
 
-    font-size: 16px;
+font-size:16px;
 
-    background: #334155;
+background:#334155;
 
-    color: white;
+color:white;
 
-    margin-bottom: 12px;
+margin-bottom:12px;
 
-    font-family:
-    Tahoma,
-    Arial,
-    sans-serif;
+font-family:
+Tahoma,
+Arial,
+sans-serif;
+
 }}
 
 textarea {{
 
-    min-height: 180px;
+min-height:180px;
 
-    resize: vertical;
+resize:vertical;
+
 }}
 
 button {{
 
-    width: 100%;
+width:100%;
 
-    border: none;
+border:none;
 
-    border-radius: 13px;
+border-radius:13px;
 
-    padding: 14px;
+padding:14px;
 
-    margin-top: 8px;
+margin-top:8px;
 
-    font-size: 16px;
+font-size:16px;
 
-    cursor: pointer;
+cursor:pointer;
 
-    background: #2563eb;
+background:#2563eb;
 
-    color: white;
+color:white;
+
 }}
 
 button:hover {{
 
-    background: #1d4ed8;
+background:#1d4ed8;
+
 }}
 
 .delete {{
 
-    background: #dc2626;
-}}
+background:#dc2626;
 
-.delete:hover {{
-
-    background: #b91c1c;
 }}
 
 .status-button {{
 
-    background: #16a34a;
+background:#16a34a;
+
 }}
 
 .logout {{
 
-    background: #475569;
+background:#475569;
+
 }}
 
 .success {{
 
-    background: #166534;
+background:#166534;
 
-    padding: 18px;
+padding:18px;
 
-    border-radius: 14px;
+border-radius:14px;
 
-    text-align: center;
+text-align:center;
+
 }}
 
 .error {{
 
-    background: #991b1b;
+background:#991b1b;
 
-    padding: 18px;
+padding:18px;
 
-    border-radius: 14px;
+border-radius:14px;
 
-    text-align: center;
+text-align:center;
 
-    word-break: break-word;
+word-break:break-word;
+
 }}
 
 .report {{
 
-    background: #334155;
+background:#334155;
 
-    border-radius: 17px;
+border-radius:17px;
 
-    padding: 18px;
+padding:18px;
 
-    margin-bottom: 16px;
+margin-bottom:16px;
+
 }}
 
 .report-text {{
 
-    white-space: pre-wrap;
+white-space:pre-wrap;
 
-    line-height: 1.9;
+line-height:1.9;
 
-    margin:
-    15px 0;
+margin:15px 0;
+
 }}
 
 .date {{
 
-    color: #cbd5e1;
+color:#cbd5e1;
 
-    font-size: 13px;
+font-size:13px;
 
-    margin-bottom: 10px;
 }}
 
 .code {{
 
-    background: #0f172a;
+background:#0f172a;
 
-    border-radius: 10px;
+border-radius:10px;
 
-    padding: 10px;
+padding:12px;
 
-    text-align: center;
+text-align:center;
 
-    font-weight: bold;
+font-weight:bold;
 
-    letter-spacing: 1px;
+letter-spacing:1px;
 
-    margin: 10px 0;
+margin:10px 0;
+
 }}
 
 .badge {{
 
-    display: inline-block;
+display:inline-block;
 
-    padding: 7px 12px;
+padding:7px 12px;
 
-    border-radius: 20px;
+border-radius:20px;
 
-    background: #2563eb;
+background:#2563eb;
 
-    margin-bottom: 8px;
+margin-bottom:8px;
+
 }}
 
 .back {{
 
-    display: block;
+display:block;
 
-    text-align: center;
+text-align:center;
 
-    color: #93c5fd;
+color:#93c5fd;
 
-    margin-top: 18px;
+margin-top:18px;
 
-    text-decoration: none;
+text-decoration:none;
+
 }}
 
 .stats {{
 
-    display: grid;
+display:grid;
 
-    grid-template-columns:
-    repeat(3, 1fr);
+grid-template-columns:
+repeat(3,1fr);
 
-    gap: 10px;
+gap:10px;
 
-    margin-bottom: 20px;
+margin-bottom:20px;
+
 }}
 
 .stat {{
 
-    background: #334155;
+background:#334155;
 
-    border-radius: 15px;
+border-radius:15px;
 
-    padding: 15px;
+padding:15px;
 
-    text-align: center;
+text-align:center;
+
 }}
 
 .stat-number {{
 
-    font-size: 26px;
+font-size:26px;
 
-    font-weight: bold;
-}}
+font-weight:bold;
 
-.search-box {{
-
-    margin-bottom: 20px;
-}}
-
-.small-form {{
-
-    margin-top: 10px;
-}}
-
-.empty {{
-
-    text-align: center;
-
-    color: #cbd5e1;
-
-    padding: 30px;
 }}
 
 @media(max-width:600px) {{
 
-    .stats {{
+.stats {{
 
-        grid-template-columns: 1fr;
-    }}
+grid-template-columns:1fr;
 
-    .card {{
+}}
 
-        padding: 18px;
-    }}
+.card {{
+
+padding:18px;
+
+}}
+
 }}
 
 </style>
@@ -425,11 +418,15 @@ button:hover {{
 
 def main_page():
 
-    content = """
+    return page(
+        "سامانه غدیر",
+        """
 
 <div class="card">
 
-<h1>📝 سامانه غدیر</h1>
+<h1>
+📝 سامانه غدیر
+</h1>
 
 <p style="text-align:center;color:#cbd5e1;">
 سامانه ثبت و پیگیری گزارش
@@ -467,25 +464,26 @@ required
 </div>
 
 """
-
-    return page("سامانه غدیر", content)
+    )
 
 
 # =========================
-# صفحه موفقیت
+# موفقیت
 # =========================
 
 def success_page(code):
 
-    safe_code = html.escape(code)
-
-    content = f"""
+    return page(
+        "ثبت موفق",
+        f"""
 
 <div class="card">
 
 <div class="success">
 
-<h2>✅ گزارش ثبت شد</h2>
+<h2>
+✅ گزارش ثبت شد
+</h2>
 
 <p>
 گزارش شما با موفقیت ذخیره شد.
@@ -497,12 +495,12 @@ def success_page(code):
 
 <br>
 
-{safe_code}
+{html.escape(code)}
 
 </div>
 
 <p>
-این کد را برای پیگیری گزارش نگه دارید.
+این کد را برای پیگیری نگه دارید.
 </p>
 
 </div>
@@ -514,28 +512,29 @@ def success_page(code):
 </div>
 
 """
-
-    return page("ثبت موفق", content)
+    )
 
 
 # =========================
-# صفحه خطا
+# خطا
 # =========================
 
 def error_page(error_text):
 
-    safe_error = html.escape(str(error_text))
-
-    content = f"""
+    return page(
+        "خطا",
+        f"""
 
 <div class="card">
 
 <div class="error">
 
-<h2>❌ عملیات ناموفق بود</h2>
+<h2>
+❌ عملیات ناموفق بود
+</h2>
 
 <p>
-{safe_error}
+{html.escape(str(error_text))}
 </p>
 
 </div>
@@ -547,8 +546,7 @@ def error_page(error_text):
 </div>
 
 """
-
-    return page("خطا", content)
+    )
 
 
 # =========================
@@ -557,11 +555,15 @@ def error_page(error_text):
 
 def admin_login_page():
 
-    content = """
+    return page(
+        "ورود مدیریت",
+        """
 
 <div class="card">
 
-<h1>🔐 ورود مدیریت</h1>
+<h1>
+🔐 ورود مدیریت
+</h1>
 
 <form method="POST" action="/login">
 
@@ -585,23 +587,27 @@ required
 </div>
 
 """
-
-    return page("ورود مدیریت", content)
+    )
 
 
 # =========================
-# بررسی نشست
+# بررسی ورود
 # =========================
 
 def is_logged_in(handler):
 
-    cookie = handler.headers.get("Cookie", "")
+    cookie = handler.headers.get(
+        "Cookie",
+        ""
+    )
 
-    return cookie == "session=" + SESSION_TOKEN
+    return cookie == (
+        "session=" + SESSION_TOKEN
+    )
 
 
 # =========================
-# پنل گزارش‌ها
+# پنل مدیریت
 # =========================
 
 def reports_page(search=""):
@@ -656,67 +662,62 @@ def reports_page(search=""):
         if x.get("status", "") == "بررسی‌شده"
     )
 
-    if not reports:
+    reports_html = ""
 
-        reports_html = """
+    for item in reports:
 
-<div class="empty">
+        report_id = str(
+            item.get("id", "")
+        )
 
-هنوز گزارشی پیدا نشد.
+        report_text = html.escape(
+            str(item.get("report", ""))
+        )
 
-</div>
+        created_at = html.escape(
+            str(item.get("created_at", ""))
+        )
 
-"""
-
-    else:
-
-        reports_html = ""
-
-        for item in reports:
-
-            report_id = str(
-                item.get("id", "")
-            )
-
-            report_text = html.escape(
-                str(item.get("report", ""))
-            )
-
-            created_at = html.escape(
-                str(item.get("created_at", ""))
-            )
-
-            tracking_code = html.escape(
-                str(
-                    item.get(
-                        "tracking_code",
-                        "GHD-" + report_id
-                    )
+        tracking_code = html.escape(
+            str(
+                item.get(
+                    "tracking_code",
+                    ""
                 )
             )
+        )
 
-            status = html.escape(
-                str(
-                    item.get(
-                        "status",
-                        "جدید"
-                    )
-                )
+        if not tracking_code:
+
+            tracking_code = (
+                "GHD-"
+                + report_id
             )
 
-            reports_html += f"""
+        status = html.escape(
+            str(
+                item.get(
+                    "status",
+                    "جدید"
+                )
+            )
+        )
+
+        reports_html += f"""
 
 <div class="report">
 
 <div class="badge">
 
-وضعیت: {status}
+وضعیت:
+{status}
 
 </div>
 
 <div class="code">
 
 کد پیگیری:
+
 {tracking_code}
 
 </div>
@@ -730,15 +731,14 @@ def reports_page(search=""):
 <div class="date">
 
 زمان ثبت:
+
 {created_at}
 
 </div>
 
-
 <form
 method="POST"
 action="/status"
-class="small-form"
 >
 
 <input
@@ -749,24 +749,15 @@ value="{html.escape(report_id)}"
 
 <select name="status">
 
-<option
-value="جدید"
-{"selected" if status == "جدید" else ""}
->
+<option value="جدید">
 جدید
 </option>
 
-<option
-value="در حال بررسی"
-{"selected" if status == "در حال بررسی" else ""}
->
+<option value="در حال بررسی">
 در حال بررسی
 </option>
 
-<option
-value="بررسی‌شده"
-{"selected" if status == "بررسی‌شده" else ""}
->
+<option value="بررسی‌شده">
 بررسی‌شده
 </option>
 
@@ -776,16 +767,16 @@ value="بررسی‌شده"
 class="status-button"
 type="submit"
 >
+
 💾 تغییر وضعیت
+
 </button>
 
 </form>
 
-
 <form
 method="POST"
 action="/delete"
-class="small-form"
 >
 
 <input
@@ -797,7 +788,6 @@ value="{html.escape(report_id)}"
 <button
 class="delete"
 type="submit"
-onclick="return confirm('آیا از حذف این گزارش مطمئن هستید؟');"
 >
 
 🗑️ حذف گزارش
@@ -810,7 +800,21 @@ onclick="return confirm('آیا از حذف این گزارش مطمئن هست�
 
 """
 
-    content = f"""
+    if not reports_html:
+
+        reports_html = """
+
+<div class="card">
+
+هنوز گزارشی پیدا نشد.
+
+</div>
+
+"""
+
+    return page(
+        "پنل مدیریت",
+        f"""
 
 <div class="card">
 
@@ -826,7 +830,7 @@ onclick="return confirm('آیا از حذف این گزارش مطمئن هست�
 {total}
 </div>
 
-کل نمایش‌داده‌شده
+کل گزارش‌ها
 
 </div>
 
@@ -852,15 +856,16 @@ onclick="return confirm('آیا از حذف این گزارش مطمئن هست�
 
 </div>
 
-
-<form method="GET" action="/reports">
+<form
+method="GET"
+action="/reports"
+>
 
 <input
-class="search-box"
 type="text"
 name="search"
 value="{html.escape(search)}"
-placeholder="🔎 جست‌وجو در گزارش‌ها یا کد پیگیری..."
+placeholder="🔎 جست‌وجو..."
 >
 
 <button type="submit">
@@ -869,9 +874,7 @@ placeholder="🔎 جست‌وجو در گزارش‌ها یا کد پیگیری.
 
 </form>
 
-
 {reports_html}
-
 
 <form
 method="POST"
@@ -882,28 +885,25 @@ action="/logout"
 class="logout"
 type="submit"
 >
-🚪 خروج از مدیریت
+
+🚪 خروج
+
 </button>
 
 </form>
 
-
 <a class="back" href="/">
-بازگشت به صفحه اصلی
+بازگشت
 </a>
 
 </div>
 
 """
-
-    return page(
-        "پنل مدیریت - سامانه غدیر",
-        content
     )
 
 
 # =========================
-# صفحه پیگیری
+# پیگیری
 # =========================
 
 def track_page(message=""):
@@ -922,7 +922,9 @@ def track_page(message=""):
 
 """
 
-    content = f"""
+    return page(
+        "پیگیری گزارش",
+        f"""
 
 <div class="card">
 
@@ -932,12 +934,15 @@ def track_page(message=""):
 
 {message_html}
 
-<form method="GET" action="/track">
+<form
+method="GET"
+action="/track"
+>
 
 <input
 type="text"
 name="code"
-placeholder="کد پیگیری را وارد کنید"
+placeholder="مثلاً GHD-A1B2C3D4"
 required
 >
 
@@ -954,27 +959,26 @@ required
 </div>
 
 """
-
-    return page(
-        "پیگیری گزارش",
-        content
     )
 
 
 # =========================
-# نمایش نتیجه پیگیری
+# نتیجه پیگیری
 # =========================
 
 def track_result(code):
 
-    safe_code = html.escape(code)
+    encoded_code = quote(
+        code,
+        safe=""
+    )
 
     url = (
         SUPABASE_URL
         + "/rest/v1/reports"
         + "?select=created_at,status,tracking_code"
         + "&tracking_code=eq."
-        + code
+        + encoded_code
     )
 
     reports = supabase_request(
@@ -1008,7 +1012,9 @@ def track_result(code):
         )
     )
 
-    content = f"""
+    return page(
+        "نتیجه پیگیری",
+        f"""
 
 <div class="card">
 
@@ -1018,7 +1024,7 @@ def track_result(code):
 
 <div class="code">
 
-{safe_code}
+{html.escape(code)}
 
 </div>
 
@@ -1038,7 +1044,7 @@ def track_result(code):
 </p>
 
 <a class="back" href="/track">
-پیگیری یک گزارش دیگر
+پیگیری دوباره
 </a>
 
 <a class="back" href="/">
@@ -1048,10 +1054,6 @@ def track_result(code):
 </div>
 
 """
-
-    return page(
-        "نتیجه پیگیری",
-        content
     )
 
 
@@ -1059,38 +1061,21 @@ def track_result(code):
 # سرور
 # =========================
 
-class Server(BaseHTTPRequestHandler):
-
-    def do_HEAD(self):
-
-        if self.path == "/":
-
-            self.send_response(200)
-
-            self.send_header(
-                "Content-Type",
-                "text/html; charset=utf-8"
-            )
-
-            self.end_headers()
-
-            return
-
-        self.send_response(404)
-
-        self.end_headers()
-
+class Server(
+    BaseHTTPRequestHandler
+):
 
     def do_GET(self):
 
-        parsed = urlparse(self.path)
+        parsed = urlparse(
+            self.path
+        )
 
         path = parsed.path
 
         query = parse_qs(
             parsed.query
         )
-
 
         if path == "/":
 
@@ -1100,7 +1085,6 @@ class Server(BaseHTTPRequestHandler):
 
             return
 
-
         if path == "/admin":
 
             self.send_html(
@@ -1109,28 +1093,15 @@ class Server(BaseHTTPRequestHandler):
 
             return
 
-
         if path == "/reports":
 
             if not is_logged_in(self):
 
                 self.send_response(403)
 
-                self.send_header(
-                    "Content-Type",
-                    "text/html; charset=utf-8"
-                )
-
                 self.end_headers()
 
-                self.wfile.write(
-                    "دسترسی غیرمجاز".encode(
-                        "utf-8"
-                    )
-                )
-
                 return
-
 
             try:
 
@@ -1151,7 +1122,6 @@ class Server(BaseHTTPRequestHandler):
 
             return
 
-
         if path == "/track":
 
             code = query.get(
@@ -1159,28 +1129,27 @@ class Server(BaseHTTPRequestHandler):
                 [""]
             )[0].strip()
 
-            if code:
+            try:
 
-                try:
+                if code:
 
                     self.send_html(
                         track_result(code)
                     )
 
-                except Exception as e:
+                else:
 
                     self.send_html(
-                        error_page(e)
+                        track_page()
                     )
 
-            else:
+            except Exception as e:
 
                 self.send_html(
-                    track_page()
+                    error_page(e)
                 )
 
             return
-
 
         self.send_response(404)
 
@@ -1196,12 +1165,14 @@ class Server(BaseHTTPRequestHandler):
             )
         )
 
-        raw_data = self.rfile.read(
+        data = self.rfile.read(
             length
-        ).decode("utf-8")
+        ).decode(
+            "utf-8"
+        )
 
         info = parse_qs(
-            raw_data
+            data
         )
 
 
@@ -1220,12 +1191,11 @@ class Server(BaseHTTPRequestHandler):
 
                 self.send_html(
                     error_page(
-                        "رمز ثبت گزارش در تنظیمات سرور تعریف نشده است."
+                        "REPORT_PASSWORD تنظیم نشده."
                     )
                 )
 
                 return
-
 
             if not hmac.compare_digest(
                 report_password,
@@ -1240,12 +1210,10 @@ class Server(BaseHTTPRequestHandler):
 
                 return
 
-
             report = info.get(
                 "report",
                 [""]
             )[0].strip()
-
 
             if not report:
 
@@ -1257,39 +1225,33 @@ class Server(BaseHTTPRequestHandler):
 
                 return
 
-
             try:
 
-                # ساخت کد پیگیری
                 tracking_code = (
                     "GHD-"
-                    + secrets.token_hex(4).upper()
+                    + secrets.token_hex(
+                        4
+                    ).upper()
                 )
-
-
-                url = (
-                    SUPABASE_URL
-                    + "/rest/v1/reports"
-                )
-
 
                 supabase_request(
                     "POST",
-                    url,
+                    SUPABASE_URL
+                    + "/rest/v1/reports",
                     {
                         "report": report,
-                        "tracking_code": tracking_code,
-                        "status": "جدید"
+                        "tracking_code":
+                            tracking_code,
+                        "status":
+                            "جدید"
                     }
                 )
-
 
                 self.send_html(
                     success_page(
                         tracking_code
                     )
                 )
-
 
             except Exception as e:
 
@@ -1306,7 +1268,7 @@ class Server(BaseHTTPRequestHandler):
 
 
         # =====================
-        # ورود مدیریت
+        # ورود
         # =====================
 
         if self.path == "/login":
@@ -1315,18 +1277,6 @@ class Server(BaseHTTPRequestHandler):
                 "password",
                 [""]
             )[0]
-
-
-            if not ADMIN_PASSWORD:
-
-                self.send_html(
-                    error_page(
-                        "رمز مدیریت در تنظیمات سرور تعریف نشده است."
-                    )
-                )
-
-                return
-
 
             if hmac.compare_digest(
                 password,
@@ -1374,7 +1324,6 @@ class Server(BaseHTTPRequestHandler):
 
                 return
 
-
             report_id = info.get(
                 "id",
                 [""]
@@ -1385,48 +1334,155 @@ class Server(BaseHTTPRequestHandler):
                 ["جدید"]
             )[0]
 
-
             allowed = [
                 "جدید",
                 "در حال بررسی",
                 "بررسی‌شده"
             ]
 
+            if (
+                not report_id.isdigit()
+                or status not in allowed
+            ):
+
+                self.send_html(
+                    error_page(
+                        "اطلاعات نامعتبر است."
+                    )
+                )
+
+                return
+
+            try:
+
+                supabase_request(
+                    "PATCH",
+                    SUPABASE_URL
+                    + "/rest/v1/reports"
+                    + "?id=eq."
+                    + report_id,
+                    {
+                        "status": status
+                    }
+                )
+
+                self.send_response(302)
+
+                self.send_header(
+                    "Location",
+                    "/reports"
+                )
+
+                self.end_headers()
+
+            except Exception as e:
+
+                self.send_html(
+                    error_page(e)
+                )
+
+            return
+
+
+        # =====================
+        # حذف
+        # =====================
+
+        if self.path == "/delete":
+
+            if not is_logged_in(self):
+
+                self.send_response(403)
+
+                self.end_headers()
+
+                return
+
+            report_id = info.get(
+                "id",
+                [""]
+            )[0]
 
             if not report_id.isdigit():
 
                 self.send_html(
                     error_page(
-                        "شناسه گزارش نامعتبر است."
+                        "شناسه نامعتبر است."
                     )
                 )
 
                 return
-
-
-            if status not in allowed:
-
-                self.send_html(
-                    error_page(
-                        "وضعیت نامعتبر است."
-                    )
-                )
-
-                return
-
 
             try:
 
-                url = (
+                supabase_request(
+                    "DELETE",
                     SUPABASE_URL
                     + "/rest/v1/reports"
                     + "?id=eq."
                     + report_id
                 )
 
+                self.send_response(302)
 
-                supabase_request(
-                    "PATCH",
-                    url,
-                    {
-                        "
+                self.send_header(
+                    "Location",
+                    "/reports"
+                )
+
+                self.end_headers()
+
+            except Exception as e:
+
+                self.send_html(
+                    error_page(e)
+                )
+
+            return
+
+
+        # =====================
+        # خروج
+        # =====================
+
+        if self.path == "/logout":
+
+            self.send_response(302)
+
+            self.send_header(
+                "Location",
+                "/"
+            )
+
+            self.send_header(
+                "Set-Cookie",
+                "session=deleted; "
+                "HttpOnly; "
+                "Secure; "
+                "SameSite=Strict; "
+                "Max-Age=0"
+            )
+
+            self.end_headers()
+
+            return
+
+        self.send_response(404)
+
+        self.end_headers()
+
+
+    def send_html(self, content):
+
+        self.send_response(200)
+
+        self.send_header(
+            "Content-Type",
+            "text/html; charset=utf-8"
+        )
+
+        self.end_headers()
+
+        self.wfile.write(
+            content.encode("utf-8")
+   
