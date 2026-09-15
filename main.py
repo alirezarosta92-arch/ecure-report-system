@@ -1,779 +1,304 @@
-import os
-import json
-import time
-import secrets
-import hmac
-import urllib.request
-import urllib.parse
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import os,json,time,secrets,hmac,urllib.request,urllib.parse
+from http.server import BaseHTTPRequestHandler,HTTPServer
 
-# =========================
-# تنظیمات
-# =========================
+PORT=int(os.getenv('PORT','10000'))
+URL=os.getenv('SUPABASE_URL','').rstrip('/')
+KEY=os.getenv('SUPABASE_SECRET_KEY','')
+ADMIN=os.getenv('ADMIN_PASSWORD','')
+REPORT=os.getenv('REPORT_PASSWORD','')
 
-PORT = int(os.getenv("PORT", "10000"))
+sessions={}
+attempts={}
+TTL=7200
+MAX=10000
 
-SUPABASE_URL = os.getenv(
-    "SUPABASE_URL",
-    ""
-).rstrip("/")
+def esc(x):
+    return ('' if x is None else str(x)).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;').replace('"','&quot;').replace("'",'&#x27;')
 
-SUPABASE_KEY = os.getenv(
-    "SUPABASE_SECRET_KEY",
-    ""
-)
-
-ADMIN_PASSWORD = os.getenv(
-    "ADMIN_PASSWORD",
-    ""
-)
-
-REPORT_PASSWORD = os.getenv(
-    "REPORT_PASSWORD",
-    ""
-)
-
-sessions = {}
-
-login_attempts = {}
-
-SESSION_TIME = 2 * 60 * 60
-
-MAX_REPORT_LENGTH = 10000
-
-
-# =========================
-# Supabase
-# =========================
-
-def supabase_request(method, url, data=None):
-
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": "Bearer " + SUPABASE_KEY,
-        "Content-Type": "application/json",
-        "Prefer": "return=representation"
-    }
-
-    body = None
-
-    if data is not None:
-        body = json.dumps(data).encode("utf-8")
-
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers=headers,
+def db(method,path,data=None):
+    req=urllib.request.Request(
+        URL+path,
+        headers={
+            'apikey':KEY,
+            'Authorization':'Bearer '+KEY,
+            'Content-Type':'application/json',
+            'Accept':'application/json',
+            'Prefer':'return=representation'
+        },
+        data=json.dumps(data,ensure_ascii=False).encode() if data is not None else None,
         method=method
     )
+    with urllib.request.urlopen(req,timeout=15) as r:
+        s=r.read().decode()
+        return json.loads(s) if s else None
 
-    with urllib.request.urlopen(
-        request,
-        timeout=20
-    ) as response:
-
-        result = response.read().decode(
-            "utf-8"
-        )
-
-        if not result:
-            return None
-
-        return json.loads(result)
-
-
-# =========================
-# Session
-# =========================
-
-def cookies(handler):
-
-    result = {}
-
-    raw = handler.headers.get(
-        "Cookie",
-        ""
-    )
-
-    for item in raw.split(";"):
-
-        if "=" in item:
-
-            key, value = item.strip().split(
-                "=",
-                1
-            )
-
-            result[key] = value
-
+def cookies(h):
+    result={}
+    for p in (h or '').split(';'):
+        if '=' in p:
+            k,v=p.strip().split('=',1)
+            result[k]=v
     return result
 
+def session(h):
+    token=cookies(h.headers.get('Cookie','')).get('session')
+    s=sessions.get(token) if token else None
 
-def get_session(handler):
-
-    token = cookies(
-        handler
-    ).get(
-        "session"
-    )
-
-    if not token:
+    if not s:
         return None
 
-    session = sessions.get(
-        token
-    )
-
-    if not session:
+    if time.time()-s['created']>TTL:
+        sessions.pop(token,None)
         return None
 
-    if session["expires"] < time.time():
+    return {'token':token,**s}
 
-        sessions.pop(
-            token,
-            None
-        )
+def logged(h):
+    return session(h) is not None
 
-        return None
-
-    return {
-        "token": token,
-        **session
-    }
-
-
-def create_session():
-
-    token = secrets.token_urlsafe(
-        32
-    )
-
-    csrf = secrets.token_urlsafe(
-        32
-    )
-
-    sessions[token] = {
-
-        "csrf": csrf,
-
-        "expires":
-            time.time()
-            + SESSION_TIME
-
-    }
-
-    return token, csrf
-
-
-def logged_in(handler):
-
-    return get_session(
-        handler
-    ) is not None
-
-
-def csrf_valid(handler, form):
-
-    session = get_session(
-        handler
-    )
-
-    if not session:
-        return False
-
-    submitted = form.get(
-        "csrf",
-        [""]
-    )[0]
-
-    if not submitted:
-        return False
-
-    return hmac.compare_digest(
-        submitted,
-        session["csrf"]
-    )
-
-
-# =========================
-# HTML
-# =========================
-
-def esc(value):
-
-    value = str(
-        value or ""
-    )
-
-    return (
-        value
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
-
-
-def page(title, content):
-
-    return f"""
-<!DOCTYPE html>
-
+def html_page(title,body):
+    return f'''<!doctype html>
 <html lang="fa" dir="rtl">
-
 <head>
-
-<meta charset="UTF-8">
-
-<meta name="viewport"
-content="width=device-width,initial-scale=1">
-
-<meta name="theme-color"
-content="#050505">
-
-<title>
-سامانه غدیر | {esc(title)}
-</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#080808">
+<title>سامانه غدیر | {esc(title)}</title>
 
 <style>
+*{{box-sizing:border-box}}
 
-* {{
-    box-sizing:border-box;
+body{{
+margin:0;
+min-height:100vh;
+font-family:Tahoma,Arial;
+color:#fff;
+background:
+radial-gradient(circle at 15% 10%,#493a08,transparent 30%),
+radial-gradient(circle at 90% 90%,#16344a,transparent 30%),
+linear-gradient(135deg,#050505,#101010 55%,#080808)
 }}
 
-body {{
-
-    margin:0;
-
-    min-height:100vh;
-
-    font-family:
-        Tahoma,
-        Arial,
-        sans-serif;
-
-    color:#fff;
-
-    background:
-        radial-gradient(
-            circle at top right,
-            #493600 0,
-            transparent 32%
-        ),
-        radial-gradient(
-            circle at bottom left,
-            #172554 0,
-            transparent 35%
-        ),
-        linear-gradient(
-            135deg,
-            #020202,
-            #0b0b0b,
-            #111827
-        );
-
+.c{{
+width:92%;
+max-width:900px;
+margin:25px auto
 }}
 
-.container {{
-
-    width:94%;
-
-    max-width:1000px;
-
-    margin:30px auto;
-
+.card{{
+background:#141414ee;
+border:1px solid #d4af3740;
+border-radius:24px;
+padding:25px;
+margin-bottom:18px;
+box-shadow:0 20px 60px #0008
 }}
 
-.card {{
-
-    background:
-        rgba(17,17,17,.90);
-
-    border:
-        1px solid
-        rgba(212,175,55,.25);
-
-    border-radius:26px;
-
-    padding:28px;
-
-    margin-bottom:20px;
-
-    box-shadow:
-        0 20px 60px
-        rgba(0,0,0,.45);
-
+.logo{{
+width:75px;
+height:75px;
+border-radius:22px;
+margin:auto auto 15px;
+display:flex;
+align-items:center;
+justify-content:center;
+font-size:38px;
+background:linear-gradient(135deg,#b8860b,#f5d76e,#8c6508)
 }}
 
-.logo {{
-
-    width:82px;
-
-    height:82px;
-
-    margin:0 auto 18px;
-
-    border-radius:24px;
-
-    display:flex;
-
-    align-items:center;
-
-    justify-content:center;
-
-    font-size:40px;
-
-    background:
-        linear-gradient(
-            135deg,
-            #b8860b,
-            #f5d76e,
-            #8a6500
-        );
-
-    box-shadow:
-        0 0 35px
-        rgba(212,175,55,.30);
-
+h1{{
+text-align:center;
+font-size:29px
 }}
 
-h1 {{
-
-    text-align:center;
-
-    margin:5px 0 10px;
-
+input,textarea,select{{
+width:100%;
+padding:14px;
+margin:7px 0;
+border-radius:14px;
+border:1px solid #333;
+background:#171717;
+color:#fff;
+font-size:16px
 }}
 
-h2 {{
-
-    margin-top:0;
-
+textarea{{
+min-height:180px;
+line-height:1.8
 }}
 
-.subtitle {{
-
-    text-align:center;
-
-    color:#aaa;
-
-    line-height:2;
-
-    margin-bottom:25px;
-
+button,.btn{{
+display:block;
+width:100%;
+padding:14px;
+margin:9px 0;
+border:0;
+border-radius:14px;
+text-align:center;
+text-decoration:none;
+font-weight:bold;
+font-size:16px;
+color:#111;
+background:linear-gradient(135deg,#d4af37,#f5d76e);
+cursor:pointer
 }}
 
-input,
-textarea,
-select {{
-
-    width:100%;
-
-    padding:15px;
-
-    margin-bottom:13px;
-
-    border-radius:15px;
-
-    border:
-        1px solid
-        rgba(255,255,255,.10);
-
-    background:#171717;
-
-    color:#fff;
-
-    outline:none;
-
-    font-size:16px;
-
+.dark{{
+background:#292929!important;
+color:#fff!important;
+border:1px solid #444!important
 }}
 
-textarea {{
-
-    min-height:190px;
-
-    resize:vertical;
-
-    line-height:1.9;
-
+.red{{
+background:linear-gradient(135deg,#b91c1c,#ef4444)!important;
+color:#fff!important
 }}
 
-input:focus,
-textarea:focus,
-select:focus {{
-
-    border-color:#d4af37;
-
+.error{{
+padding:17px;
+border-radius:16px;
+background:#3b1515;
+border:1px solid #7f3030;
+text-align:center;
+margin-bottom:16px
 }}
 
-button,
-.btn {{
-
-    display:block;
-
-    width:100%;
-
-    padding:15px;
-
-    margin-top:8px;
-
-    border:0;
-
-    border-radius:15px;
-
-    text-align:center;
-
-    text-decoration:none;
-
-    color:#fff;
-
-    font-size:16px;
-
-    font-weight:bold;
-
-    cursor:pointer;
-
-    background:
-        linear-gradient(
-            135deg,
-            #b8860b,
-            #d4af37,
-            #8a6500
-        );
-
+.success{{
+padding:22px;
+border-radius:18px;
+background:#12351f;
+border:1px solid #2f7d4a;
+text-align:center
 }}
 
-button:hover,
-.btn:hover {{
-
-    filter:brightness(1.12);
-
+.code{{
+background:#080808;
+border:1px solid #d4af3740;
+border-radius:14px;
+padding:15px;
+text-align:center;
+margin:15px 0;
+color:#f5d76e;
+font-weight:bold
 }}
 
-.blue {{
-
-    background:
-        linear-gradient(
-            135deg,
-            #1d4ed8,
-            #2563eb
-        );
-
+.report{{
+background:#161616;
+border:1px solid #292929;
+border-radius:18px;
+padding:17px;
+margin:13px 0
 }}
 
-.red {{
-
-    background:
-        linear-gradient(
-            135deg,
-            #991b1b,
-            #dc2626
-        );
-
+.badge{{
+display:inline-block;
+padding:6px 11px;
+border-radius:999px;
+background:#29220d;
+color:#f5d76e;
+font-size:13px
 }}
 
-.green {{
-
-    background:
-        linear-gradient(
-            135deg,
-            #047857,
-            #10b981
-        );
-
+.text{{
+white-space:pre-wrap;
+line-height:2;
+margin:13px 0
 }}
 
-.gray {{
-
-    background:
-        linear-gradient(
-            135deg,
-            #374151,
-            #4b5563
-        );
-
+.date{{
+font-size:12px;
+color:#999
 }}
 
-.back {{
-
-    display:block;
-
-    text-align:center;
-
-    color:#e5c65b;
-
-    text-decoration:none;
-
-    margin-top:17px;
-
+.stats{{
+display:grid;
+grid-template-columns:repeat(3,1fr);
+gap:10px
 }}
 
-.code {{
-
-    padding:15px;
-
-    margin:15px 0;
-
-    border-radius:15px;
-
-    text-align:center;
-
-    color:#f5d76e;
-
-    background:#050505;
-
-    border:
-        1px solid
-        rgba(212,175,55,.25);
-
-    font-weight:bold;
-
-    letter-spacing:1px;
-
+.stat{{
+background:#171717;
+border:1px solid #292929;
+border-radius:15px;
+padding:14px;
+text-align:center;
+margin:8px 0
 }}
 
-.report {{
-
-    padding:20px;
-
-    margin-bottom:15px;
-
-    border-radius:20px;
-
-    background:#151515;
-
-    border:
-        1px solid
-        rgba(255,255,255,.08);
-
+.num{{
+font-size:27px;
+color:#f5d76e;
+font-weight:bold
 }}
 
-.status {{
-
-    display:inline-block;
-
-    padding:7px 12px;
-
-    margin-bottom:10px;
-
-    border-radius:999px;
-
-    background:
-        rgba(212,175,55,.15);
-
-    color:#f5d76e;
-
+.back{{
+display:block;
+text-align:center;
+color:#f5d76e;
+text-decoration:none;
+margin-top:13px
 }}
 
-.text {{
-
-    white-space:pre-wrap;
-
-    line-height:2;
-
+@media(max-width:650px){{
+.c{{width:94%;margin:14px auto}}
+.card{{padding:19px}}
+.stats{{grid-template-columns:1fr}}
 }}
-
-.date {{
-
-    color:#888;
-
-    font-size:12px;
-
-    margin-top:10px;
-
-}}
-
-.stats {{
-
-    display:grid;
-
-    grid-template-columns:
-        repeat(3,1fr);
-
-    gap:12px;
-
-    margin-bottom:20px;
-
-}}
-
-.stat {{
-
-    text-align:center;
-
-    padding:18px;
-
-    border-radius:18px;
-
-    background:#151515;
-
-    border:
-        1px solid
-        rgba(212,175,55,.15);
-
-}}
-
-.number {{
-
-    font-size:30px;
-
-    font-weight:bold;
-
-    color:#f5d76e;
-
-}}
-
-.error {{
-
-    padding:18px;
-
-    border-radius:18px;
-
-    background:#451a1a;
-
-    border:
-        1px solid #7f1d1d;
-
-    text-align:center;
-
-    margin-bottom:18px;
-
-}}
-
-.success {{
-
-    padding:25px;
-
-    border-radius:20px;
-
-    background:#063b2b;
-
-    border:
-        1px solid #047857;
-
-    text-align:center;
-
-}}
-
-@media(max-width:700px) {{
-
-    .container {{
-        width:92%;
-        margin:18px auto;
-    }}
-
-    .card {{
-        padding:20px;
-        border-radius:22px;
-    }}
-
-    .stats {{
-        grid-template-columns:1fr;
-    }}
-
-}}
-
 </style>
-
 </head>
 
 <body>
-
-<div class="container">
-
-{content}
-
+<div class="c">
+{body}
 </div>
-
 </body>
-
-</html>
-"""
-
-
-# =========================
-# صفحه اصلی
-# =========================
+</html>'''
 
 def home():
-
-    return page(
-        "صفحه اصلی",
-        """
-
+    return html_page(
+        'خانه',
+        '''
 <div class="card">
 
-<div class="logo">
-🛡️
-</div>
+<div class="logo">🛡️</div>
 
-<h1>
-سامانه غدیر
-</h1>
+<h1>سامانه غدیر</h1>
 
-<div class="subtitle">
-
+<div style="text-align:center;color:#bbb;line-height:1.9">
 سامانه ثبت و پیگیری گزارش‌ها
-
-<br>
-
-گزارش خود را ثبت کنید و
-با کد پیگیری وضعیت آن را مشاهده کنید.
-
 </div>
 
 <a class="btn" href="/report">
 📝 ثبت گزارش
 </a>
 
-<a class="btn blue" href="/track">
+<a class="btn" href="/track">
 🔎 پیگیری گزارش
 </a>
 
-<a class="btn gray" href="/admin">
+<a class="btn dark" href="/admin">
 🔐 ورود مدیریت
 </a>
 
 </div>
-
-"""
+'''
     )
 
+def report_page(msg=''):
+    error=f'<div class="error">{esc(msg)}</div>' if msg else ''
 
-# =========================
-# ثبت گزارش
-# =========================
-
-def report_page(message=""):
-
-    error = ""
-
-    if message:
-
-        error = f"""
-<div class="error">
-{esc(message)}
-</div>
-"""
-
-    return page(
-        "ثبت گزارش",
-        f"""
-
+    return html_page(
+        'ثبت گزارش',
+        f'''
 <div class="card">
 
-<div class="logo">
-📝
-</div>
+<div class="logo">📝</div>
 
-<h1>
-ثبت گزارش
-</h1>
+<h1>ثبت گزارش</h1>
 
 {error}
 
-<form method="POST"
-action="/submit">
+<form method="POST" action="/submit">
 
 <input
 type="password"
@@ -784,8 +309,8 @@ required
 
 <textarea
 name="report"
-maxlength="{MAX_REPORT_LENGTH}"
-placeholder="✍️ گزارش خود را وارد کنید..."
+maxlength="{MAX}"
+placeholder="متن گزارش..."
 required
 ></textarea>
 
@@ -796,762 +321,539 @@ required
 </form>
 
 <a class="back" href="/">
-🏠 بازگشت
+بازگشت
 </a>
 
 </div>
-
-"""
+'''
     )
 
+def track_page(msg=''):
+    error=f'<div class="error">{esc(msg)}</div>' if msg else ''
 
-# =========================
-# نتیجه ثبت
-# =========================
-
-def success_page(code):
-
-    return page(
-        "گزارش ثبت شد",
-        f"""
-
+    return html_page(
+        'پیگیری',
+        f'''
 <div class="card">
 
-<div class="success">
+<div class="logo">🔎</div>
 
-<div style="font-size:50px">
-✅
-</div>
-
-<h2>
-گزارش با موفقیت ثبت شد
-</h2>
-
-<p>
-گزارش شما در سامانه ذخیره شد.
-</p>
-
-<div class="code">
-
-کد پیگیری
-
-<br><br>
-
-{esc(code)}
-
-</div>
-
-<p>
-این کد را برای پیگیری نگه دارید.
-</p>
-
-</div>
-
-<a class="btn blue"
-href="/track?code={urllib.parse.quote(code)}">
-
-🔎 پیگیری همین گزارش
-
-</a>
-
-<a class="back"
-href="/">
-
-🏠 صفحه اصلی
-
-</a>
-
-</div>
-
-"""
-    )
-
-
-# =========================
-# پیگیری
-# =========================
-
-def track_page(message=""):
-
-    error = ""
-
-    if message:
-
-        error = f"""
-<div class="error">
-{esc(message)}
-</div>
-"""
-
-    return page(
-        "پیگیری گزارش",
-        f"""
-
-<div class="card">
-
-<div class="logo">
-🔎
-</div>
-
-<h1>
-پیگیری گزارش
-</h1>
-
-<div class="subtitle">
-
-کد پیگیری را وارد کنید.
-
-</div>
+<h1>پیگیری گزارش</h1>
 
 {error}
 
-<form method="GET"
-action="/track">
+<form method="GET" action="/track">
 
 <input
 name="code"
-placeholder="مثال: GHD-A1B2C3D4"
+placeholder="مثلاً GHD-A1B2C3D4"
 required
 >
 
-<button class="blue"
-type="submit">
-
+<button type="submit">
 🔎 پیگیری
-
 </button>
 
 </form>
 
-<a class="back"
-href="/">
-
-🏠 بازگشت
-
+<a class="back" href="/">
+بازگشت
 </a>
 
 </div>
-
-"""
+'''
     )
 
+def admin_login(msg=''):
+    error=f'<div class="error">{esc(msg)}</div>' if msg else ''
 
-# =========================
-# نتیجه پیگیری
-# =========================
-
-def track_result(code):
-
-    url = (
-
-        SUPABASE_URL
-        + "/rest/v1/reports"
-        + "?select=created_at,status,tracking_code"
-        + "&tracking_code=eq."
-        + urllib.parse.quote(
-            code,
-            safe=""
-        )
-
-    )
-
-    reports = supabase_request(
-        "GET",
-        url
-    )
-
-    if not reports:
-
-        return track_page(
-            "گزارشی با این کد پیدا نشد."
-        )
-
-    item = reports[0]
-
-    return page(
-        "نتیجه پیگیری",
-        f"""
-
+    return html_page(
+        'ورود مدیریت',
+        f'''
 <div class="card">
 
-<div class="logo">
-📄
+<div class="logo">🔐</div>
+
+<h1>ورود مدیریت</h1>
+
+{error}
+
+<form method="POST" action="/login">
+
+<input
+type="password"
+name="password"
+placeholder="رمز مدیریت"
+required
+>
+
+<button type="submit">
+ورود
+</button>
+
+</form>
+
+<a class="back" href="/">
+بازگشت
+</a>
+
 </div>
+'''
+    )
+
+def form(h):
+    length=int(h.headers.get('Content-Length','0'))
+
+    raw=h.rfile.read(length).decode(
+        'utf-8',
+        'replace'
+    )
+
+    return urllib.parse.parse_qs(raw)
+
+def out(h,content,status=200,cookies_=None):
+    h.send_response(status)
+
+    h.send_header(
+        'Content-Type',
+        'text/html; charset=utf-8'
+    )
+
+    h.send_header(
+        'Cache-Control',
+        'no-store'
+    )
+
+    h.send_header(
+        'X-Content-Type-Options',
+        'nosniff'
+    )
+
+    h.send_header(
+        'X-Frame-Options',
+        'DENY'
+    )
+
+    h.send_header(
+        'Referrer-Policy',
+        'no-referrer'
+    )
+
+    if cookies_:
+        for x in cookies_:
+            h.send_header(
+                'Set-Cookie',
+                x
+            )
+
+    h.end_headers()
+
+    h.wfile.write(
+        content.encode('utf-8')
+    )
+
+def redir(h,loc,c=None):
+    h.send_response(302)
+
+    h.send_header(
+        'Location',
+        loc
+    )
+
+    if c:
+        for x in c:
+            h.send_header(
+                'Set-Cookie',
+                x
+            )
+
+    h.end_headers()
+
+def csrf(h,f):
+    s=session(h)
+
+    v=f.get(
+        'csrf',
+        ['']
+    )[0]
+
+    return (
+        bool(s and v)
+        and
+        hmac.compare_digest(
+            v,
+            s['csrf']
+        )
+    )
+
+def admin(h,search=''):
+    s=session(h)
+
+    rows=db(
+        'GET',
+        '/rest/v1/reports?select=id,created_at,report,tracking_code,status&order=created_at.desc'
+    ) or []
+
+    q=search.strip().lower()
+
+    if q:
+        rows=[
+            r for r in rows
+            if
+            q in str(
+                r.get('report','')
+            ).lower()
+            or
+            q in str(
+                r.get('tracking_code','')
+            ).lower()
+            or
+            q in str(
+                r.get('status','')
+            ).lower()
+        ]
+
+    total=len(rows)
+
+    new=sum(
+        r.get('status','جدید')=='جدید'
+        for r in rows
+    )
+
+    checked=sum(
+        r.get('status','')=='بررسی‌شده'
+        for r in rows
+    )
+
+    checking=sum(
+        r.get('status','')=='در حال بررسی'
+        for r in rows
+    )
+
+    cards=''
+
+    for r in rows:
+
+        rid=str(
+            r.get('id','')
+        )
+
+        st=r.get(
+            'status'
+        ) or 'جدید'
+
+        code=r.get(
+            'tracking_code'
+        ) or 'GHD-'+rid
+
+        cards+=f'''
+<div class="report">
+
+<span class="badge">
+📌 {esc(st)}
+</span>
+
+<div class="code">
+🎫 {esc(code)}
+</div>
+
+<div class="text">
+{esc(r.get('report',''))}
+</div>
+
+<div class="date">
+🕐 {esc(r.get('created_at',''))}
+</div>
+
+<form method="POST" action="/status">
+
+<input
+type="hidden"
+name="id"
+value="{esc(rid)}"
+>
+
+<input
+type="hidden"
+name="csrf"
+value="{esc(s['csrf'])}"
+>
+
+<select name="status">
+
+<option {'selected' if st=='جدید' else ''}>
+جدید
+</option>
+
+<option {'selected' if st=='در حال بررسی' else ''}>
+در حال بررسی
+</option>
+
+<option {'selected' if st=='بررسی‌شده' else ''}>
+بررسی‌شده
+</option>
+
+</select>
+
+<button type="submit">
+💾 تغییر وضعیت
+</button>
+
+</form>
+
+<form method="POST" action="/delete">
+
+<input
+type="hidden"
+name="id"
+value="{esc(rid)}"
+>
+
+<input
+type="hidden"
+name="csrf"
+value="{esc(s['csrf'])}"
+>
+
+<button
+class="red"
+type="submit"
+>
+🗑️ حذف گزارش
+</button>
+
+</form>
+
+</div>
+'''
+
+    if not cards:
+        cards='''
+<div class="report"
+style="text-align:center;color:#aaa">
+گزارشی پیدا نشد.
+</div>
+'''
+
+    return html_page(
+        'مدیریت',
+        f'''
+<div class="card">
+
+<div class="logo">📋</div>
+
+<h1>پنل مدیریت</h1>
+
+<div class="stats">
+
+<div class="stat">
+<div class="num">{total}</div>
+کل
+</div>
+
+<div class="stat">
+<div class="num">{new}</div>
+جدید
+</div>
+
+<div class="stat">
+<div class="num">{checked}</div>
+بررسی‌شده
+</div>
+
+</div>
+
+<div class="stat">
+
+<div class="num">
+{checking}
+</div>
+
+در حال بررسی
+
+</div>
+
+<form method="GET">
+
+<input
+name="search"
+value="{esc(search)}"
+placeholder="جست‌وجو"
+>
+
+<button type="submit">
+🔍 جست‌وجو
+</button>
+
+</form>
+
+{cards}
+
+<form method="POST" action="/logout">
+
+<input
+type="hidden"
+name="csrf"
+value="{esc(s['csrf'])}"
+>
+
+<button
+class="dark"
+type="submit"
+>
+🚪 خروج
+</button>
+
+</form>
+
+<a class="back" href="/">
+صفحه اصلی
+</a>
+
+</div>
+'''
+    )
+
+class Handler(BaseHTTPRequestHandler):
+
+    def do_GET(self):
+
+        p=urllib.parse.urlparse(
+            self.path
+        )
+
+        q=urllib.parse.parse_qs(
+            p.query
+        )
+
+        try:
+
+            if p.path=='/':
+                out(
+                    self,
+                    home()
+                )
+                return
+
+            if p.path=='/report':
+                out(
+                    self,
+                    report_page()
+                )
+                return
+
+            if p.path=='/track':
+
+                code=q.get(
+                    'code',
+                    ['']
+                )[0].strip()
+
+                if not code:
+                    out(
+                        self,
+                        track_page()
+                    )
+                    return
+
+                rows=db(
+                    'GET',
+                    '/rest/v1/reports?select=created_at,status,tracking_code&tracking_code=eq.'
+                    +
+                    urllib.parse.quote(
+                        code,
+                        safe=''
+                    )
+                ) or []
+
+                if not rows:
+                    out(
+                        self,
+                        track_page(
+                            'گزارشی با این کد پیدا نشد.'
+                        )
+                    )
+                    return
+
+                r=rows[0]
+
+                out(
+                    self,
+                    html_page(
+                        'نتیجه',
+                        f'''
+<div class="card">
+
+<div class="logo">📄</div>
 
 <h1>
 نتیجه پیگیری
 </h1>
 
 <div class="code">
-
-🎫 {esc(code)}
-
+🎫 {esc(r.get('tracking_code',code))}
 </div>
 
 <div
-class="status"
-style="margin-top:20px"
+style="
+text-align:center;
+font-size:23px;
+margin:25px 0
+"
 >
-
-📌 وضعیت:
-
-{esc(item.get("status","جدید"))}
-
+{esc(r.get('status','جدید'))}
 </div>
 
-<p class="date">
+<div
+class="date"
+style="text-align:center"
+>
+{esc(r.get('created_at',''))}
+</div>
 
-🕐 زمان ثبت:
-
-{esc(item.get("created_at",""))}
-
-</p>
-
-<a class="back"
-href="/track">
-
-🔎 پیگیری دوباره
-
-</a>
-
-<a class="back"
-href="/">
-
-🏠 صفحه اصلی
-
+<a
+class="back"
+href="/track"
+>
+پیگیری دوباره
 </a>
 
 </div>
-
-"""
-    )
-
-
-# =========================
-# ورود مدیر
-# =========================
-
-def admin_page():
-
-    return page(
-        "ورود مدیریت",
-        """
-
-<div class="card">
-
-<div class="logo">
-🔐
-</div>
-
-<h1>
-ورود مدیریت
-</h1>
-
-<div class="subtitle">
-
-رمز مدیریت را وارد کنید.
-
-</div>
-
-<form method="POST"
-action="/login">
-
-<input
-type="password"
-name="password"
-placeholder="🔑 رمز مدیریت"
-required
->
-
-<button type="submit">
-
-🚪 ورود
-
-</button>
-
-</form>
-
-<a class="back"
-href="/">
-
-🏠 بازگشت
-
-</a>
-
-</div>
-
-"""
-    )
-
-
-# =========================
-# پنل مدیریت
-# =========================
-
-def admin_panel(handler):
-
-    session = get_session(
-        handler
-    )
-
-    url = (
-
-        SUPABASE_URL
-        + "/rest/v1/reports"
-        + "?select=id,created_at,report,tracking_code,status"
-        + "&order=created_at.desc"
-
-    )
-
-    reports = supabase_request(
-        "GET",
-        url
-    ) or []
-
-    total = len(reports)
-
-    new_count = sum(
-        1 for x in reports
-        if x.get("status") == "جدید"
-    )
-
-    checked_count = sum(
-        1 for x in reports
-        if x.get("status") == "بررسی‌شده"
-    )
-
-    cards = ""
-
-    for item in reports:
-
-        report_id = str(
-            item.get("id","")
-        )
-
-        code = item.get(
-            "tracking_code",
-            ""
-        )
-
-        status = item.get(
-            "status",
-            "جدید"
-        )
-
-        cards += f"""
-
-<div class="report">
-
-<div class="status">
-
-📌 {esc(status)}
-
-</div>
-
-<div class="code">
-
-🎫 {esc(code)}
-
-</div>
-
-<div class="text">
-
-{esc(item.get("report",""))}
-
-</div>
-
-<div class="date">
-
-🕐 {esc(item.get("created_at",""))}
-
-</div>
-
-<form
-method="POST"
-action="/status"
->
-
-<input
-type="hidden"
-name="csrf"
-value="{esc(session["csrf"])}"
->
-
-<input
-type="hidden"
-name="id"
-value="{esc(report_id)}"
->
-
-<select name="status">
-
-<option>
-جدید
-</option>
-
-<option>
-در حال بررسی
-</option>
-
-<option>
-بررسی‌شده
-</option>
-
-</select>
-
-<button class="green">
-
-💾 تغییر وضعیت
-
-</button>
-
-</form>
-
-<form
-method="POST"
-action="/delete"
->
-
-<input
-type="hidden"
-name="csrf"
-value="{esc(session["csrf"])}"
->
-
-<input
-type="hidden"
-name="id"
-value="{esc(report_id)}"
->
-
-<button class="red">
-
-🗑️ حذف گزارش
-
-</button>
-
-</form>
-
-</div>
-
-"""
-
-    if not cards:
-
-        cards = """
-
-<div class="report"
-style="text-align:center">
-
-📭
-
-<br><br>
-
-هنوز گزارشی ثبت نشده است.
-
-</div>
-
-"""
-
-    return page(
-        "پنل مدیریت",
-        f"""
-
-<div class="card">
-
-<div class="logo">
-📋
-</div>
-
-<h1>
-پنل مدیریت
-</h1>
-
-<div class="stats">
-
-<div class="stat">
-
-<div class="number">
-{total}
-</div>
-
-کل گزارش‌ها
-
-</div>
-
-<div class="stat">
-
-<div class="number">
-{new_count}
-</div>
-
-جدید
-
-</div>
-
-<div class="stat">
-
-<div class="number">
-{checked_count}
-</div>
-
-بررسی‌شده
-
-</div>
-
-</div>
-
-{cards}
-
-<form method="POST"
-action="/logout">
-
-<input
-type="hidden"
-name="csrf"
-value="{esc(session["csrf"])}"
->
-
-<button class="gray">
-
-🚪 خروج
-
-</button>
-
-</form>
-
-<a class="back"
-href="/">
-
-🏠 صفحه اصلی
-
-</a>
-
-</div>
-
-"""
-    )
-
-
-# =========================
-# Handler
-# =========================
-
-class Handler(BaseHTTPRequestHandler):
-
-    def send_html(
-        self,
-        content,
-        status=200,
-        cookies=None
-    ):
-
-        self.send_response(
-            status
-        )
-
-        self.send_header(
-            "Content-Type",
-            "text/html; charset=utf-8"
-        )
-
-        self.send_header(
-            "Cache-Control",
-            "no-store"
-        )
-
-        self.send_header(
-            "X-Content-Type-Options",
-            "nosniff"
-        )
-
-        self.send_header(
-            "X-Frame-Options",
-            "DENY"
-        )
-
-        self.send_header(
-            "Referrer-Policy",
-            "no-referrer"
-        )
-
-        if cookies:
-
-            for cookie in cookies:
-
-                self.send_header(
-                    "Set-Cookie",
-                    cookie
-                )
-
-        self.end_headers()
-
-        self.wfile.write(
-            content.encode("utf-8")
-        )
-
-
-    def redirect(
-        self,
-        location,
-        cookies=None
-    ):
-
-        self.send_response(
-            302
-        )
-
-        self.send_header(
-            "Location",
-            location
-        )
-
-        if cookies:
-
-            for cookie in cookies:
-
-                self.send_header(
-                    "Set-Cookie",
-                    cookie
-                )
-
-        self.end_headers()
-
-
-    def read_form(self):
-
-        length = int(
-            self.headers.get(
-                "Content-Length",
-                "0"
-            )
-        )
-
-        body = self.rfile.read(
-            length
-        ).decode(
-            "utf-8",
-            errors="replace"
-        )
-
-        return urllib.parse.parse_qs(
-            body
-        )
-
-
-    # =====================
-    # GET
-    # =====================
-
-    def do_GET(self):
-
-        parsed = urllib.parse.urlparse(
-            self.path
-        )
-
-        path = parsed.path
-
-        query = urllib.parse.parse_qs(
-            parsed.query
-        )
-
-        try:
-
-            if path == "/":
-
-                self.send_html(
-                    home()
+'''
+                    )
                 )
 
                 return
 
+            if p.path=='/admin':
 
-            if path == "/report":
+                if logged(self):
 
-                self.send_html(
-                    report_page()
-                )
-
-                return
-
-
-            if path == "/track":
-
-                code = query.get(
-                    "code",
-                    [""]
-                )[0].strip()
-
-                if code:
-
-                    self.send_html(
-                        track_result(
-                            code
+                    out(
+                        self,
+                        admin(
+                            self,
+                            q.get(
+                                'search',
+                                ['']
+                            )[0]
                         )
                     )
 
                 else:
 
-                    self.send_html(
-                        track_page()
+                    out(
+                        self,
+                        admin_login()
                     )
 
                 return
 
-
-            if path == "/admin":
-
-                self.send_html(
-                    admin_page()
-                )
-
-                return
-
-
-            if path == "/reports":
-
-                if not logged_in(
-                    self
-                ):
-
-                    self.send_html(
-                        page(
-                            "خطا",
-                            """
-<div class="card">
-<div class="error">
-نشست معتبر نیست.
-</div>
-<a class="back" href="/admin">
-بازگشت
-</a>
-</div>
-"""
-                        ),
-                        403
-                    )
-
-                    return
-
-                self.send_html(
-                    admin_panel(
-                        self
-                    )
-                )
-
-                return
-
-
-            self.send_html(
-                page(
-                    "404",
-                    """
-<div class="card">
-<h1>404</h1>
-<p>صفحه پیدا نشد.</p>
-<a class="back" href="/">صفحه اصلی</a>
-</div>
-"""
+            out(
+                self,
+                html_page(
+                    '404',
+                    '<div class="card"><h2>صفحه پیدا نشد</h2></div>'
                 ),
                 404
             )
@@ -1559,77 +861,278 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
 
             print(
-                "GET ERROR:",
+                'GET ERROR:',
                 repr(e)
             )
 
-            self.send_html(
-                page(
-                    "خطا",
-                    f"""
-<div class="card">
-<div class="error">
-خطایی رخ داد.
-</div>
-<p>{esc(e)}</p>
-<a class="back" href="/">بازگشت</a>
-</div>
-"""
+            out(
+                self,
+                html_page(
+                    'خطا',
+                    f'<div class="card"><div class="error">{esc(e)}</div></div>'
                 ),
                 500
             )
 
-
-    # =====================
-    # POST
-    # =====================
-
     def do_POST(self):
 
-        path = urllib.parse.urlparse(
+        p=urllib.parse.urlparse(
             self.path
         ).path
 
-        form = self.read_form()
+        f=form(self)
 
         try:
 
-            # ثبت گزارش
-            if path == "/submit":
+            if p=='/submit':
 
-                password = form.get(
-                    "report_password",
-                    [""]
+                pw=f.get(
+                    'report_password',
+                    ['']
                 )[0]
 
-                if not REPORT_PASSWORD:
-
-                    self.send_html(
-                        report_page(
-                            "رمز ثبت گزارش تنظیم نشده است."
-                        )
-                    )
-
-                    return
-
-                if not hmac.compare_digest(
-                    password,
-                    REPORT_PASSWORD
-                ):
-
-                    self.send_html(
-                        report_page(
-                            "رمز ثبت گزارش اشتباه است."
-                        )
-                    )
-
-                    return
-
-                report = form.get(
-                    "report",
-                    [""]
+                text=f.get(
+                    'report',
+                    ['']
                 )[0].strip()
 
-                if not report:
+                if not REPORT:
 
-  
+                    return out(
+                        self,
+                        report_page(
+                            'REPORT_PASSWORD در Render تنظیم نشده است.'
+                        ),
+                        500
+                    )
+
+                if not hmac.compare_digest(
+                    pw,
+                    REPORT
+                ):
+
+                    return out(
+                        self,
+                        report_page(
+                            'رمز ثبت گزارش اشتباه است.'
+                        ),
+                        403
+                    )
+
+                if not text:
+
+                    return out(
+                        self,
+                        report_page(
+                            'متن گزارش خالی است.'
+                        ),
+                        400
+                    )
+
+                if len(text)>MAX:
+
+                    return out(
+                        self,
+                        report_page(
+                            'گزارش بیش از حد طولانی است.'
+                        ),
+                        400
+                    )
+
+                code='GHD-'+secrets.token_hex(4).upper()
+
+                db(
+                    'POST',
+                    '/rest/v1/reports',
+                    {
+                        'report':text,
+                        'tracking_code':code,
+                        'status':'جدید'
+                    }
+                )
+
+                return out(
+                    self,
+                    html_page(
+                        'ثبت شد',
+                        f'''
+<div class="card">
+
+<div class="success">
+
+<h2>
+✅ گزارش ثبت شد
+</h2>
+
+<div class="code">
+🎫 کد پیگیری
+<br><br>
+{esc(code)}
+</div>
+
+</div>
+
+<a
+class="back"
+href="/track"
+>
+پیگیری
+</a>
+
+</div>
+'''
+                    )
+                )
+
+            if p=='/login':
+
+                ip=self.client_address[0]
+                now=time.time()
+
+                a=[
+                    x
+                    for x in attempts.get(
+                        ip,
+                        []
+                    )
+                    if now-x<600
+                ]
+
+                if len(a)>=5:
+
+                    return out(
+                        self,
+                        admin_login(
+                            'تعداد تلاش‌ها زیاد است؛ بعداً دوباره امتحان کنید.'
+                        ),
+                        429
+                    )
+
+                pw=f.get(
+                    'password',
+                    ['']
+                )[0]
+
+                if not ADMIN:
+
+                    return out(
+                        self,
+                        admin_login(
+                            'ADMIN_PASSWORD در Render تنظیم نشده است.'
+                        ),
+                        500
+                    )
+
+                if hmac.compare_digest(
+                    pw,
+                    ADMIN
+                ):
+
+                    t,c=(
+                        secrets.token_urlsafe(32),
+                        secrets.token_urlsafe(32)
+                    )
+
+                    sessions[t]={
+                        'csrf':c,
+                        'created':now
+                    }
+
+                    attempts.pop(
+                        ip,
+                        None
+                    )
+
+                    return redir(
+                        self,
+                        '/admin',
+                        [
+                            f'session={t}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={TTL}',
+                            f'csrf={c}; Path=/; Secure; SameSite=Lax; Max-Age={TTL}'
+                        ]
+                    )
+
+                a.append(now)
+                attempts[ip]=a
+
+                return out(
+                    self,
+                    admin_login(
+                        'رمز مدیریت اشتباه است.'
+                    ),
+                    403
+                )
+
+            if not logged(self):
+
+                return out(
+                    self,
+                    html_page(
+                        'دسترسی',
+                        '<div class="card"><div class="error">نشست معتبر نیست.</div></div>'
+                    ),
+                    403
+                )
+
+            if not csrf(
+                self,
+                f
+            ):
+
+                return out(
+                    self,
+                    html_page(
+                        'دسترسی',
+                        '<div class="card"><div class="error">درخواست نامعتبر است.</div></div>'
+                    ),
+                    403
+                )
+
+            if p=='/status':
+
+                rid=f.get(
+                    'id',
+                    ['']
+                )[0]
+
+                st=f.get(
+                    'status',
+                    ['']
+                )[0]
+
+                allowed=[
+                    'جدید',
+                    'در حال بررسی',
+                    'بررسی‌شده'
+                ]
+
+                if (
+                    not rid.isdigit()
+                    or st not in allowed
+                ):
+
+                    return out(
+                        self,
+                        html_page(
+                            'خطا',
+                            '<div class="card"><div class="error">اطلاعات نامعتبر است.</div></div>'
+                        ),
+                        400
+                    )
+
+                db(
+                    'PATCH',
+                    '/rest/v1/reports?id=eq.'
+                    +
+                    urllib.parse.quote(
+                        rid,
+                        safe=''
+                    ),
+                    {
+                        'status':st
+                    }
+                )
+
+                return redir(
+                    self,
+                    
