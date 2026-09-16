@@ -1,163 +1,144 @@
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import parse_qs, urlparse, quote
-import urllib.request
-import urllib.error
-import json
-import html
 import os
+import json
+import time
 import secrets
 import hmac
-import time
+import urllib.request
+import urllib.parse
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 
 
-# =========================================================
+# =========================
 # تنظیمات
-# =========================================================
+# =========================
 
-PORT = int(os.environ.get("PORT", "8080"))
+PORT = int(os.environ.get("PORT", "10000"))
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY = os.environ.get("SUPABASE_SECRET_KEY", "")
 
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
 REPORT_PASSWORD = os.environ.get("REPORT_PASSWORD", "")
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
-SUPABASE_SECRET_KEY = os.environ.get("SUPABASE_SECRET_KEY", "")
+SESSION_TTL = 2 * 60 * 60
+MAX_REPORT_LENGTH = 10000
 
-SESSION_TTL = int(os.environ.get("SESSION_TTL", "3600"))
-
-SESSIONS = {}
+sessions = {}
 
 
-# =========================================================
-# ابزارهای عمومی
-# =========================================================
+# =========================
+# ابزارهای امنیتی
+# =========================
 
-def parse_cookies(header):
-    result = {}
+def new_token():
+    return secrets.token_urlsafe(32)
 
-    for part in (header or "").split(";"):
-        if "=" not in part:
-            continue
-
-        name, value = part.strip().split("=", 1)
-        result[name] = value
-
-    return result
-
-
-def cookie_attributes(max_age=None, http_only=True):
-    parts = [
-        "Path=/",
-        "SameSite=Strict"
-    ]
-
-    if http_only:
-        parts.append("HttpOnly")
-
-    if os.environ.get("COOKIE_SECURE", "1") != "0":
-        parts.append("Secure")
-
-    if max_age is not None:
-        parts.append("Max-Age=" + str(max_age))
-
-    return "; ".join(parts)
-
-
-# =========================================================
-# نشست
-# =========================================================
 
 def create_session():
-    session_token = secrets.token_urlsafe(32)
-    csrf_token = secrets.token_urlsafe(32)
+    token = new_token()
+    csrf = new_token()
 
-    SESSIONS[session_token] = {
-        "csrf_token": csrf_token,
-        "expires_at": time.time() + SESSION_TTL
+    sessions[token] = {
+        "csrf": csrf,
+        "expires": time.time() + SESSION_TTL
     }
 
-    return session_token, csrf_token
+    return token, csrf
 
 
 def get_session(handler):
-    cookies = parse_cookies(
-        handler.headers.get("Cookie", "")
-    )
+    cookie = handler.headers.get("Cookie", "")
 
-    token = cookies.get("session")
+    for item in cookie.split(";"):
+        item = item.strip()
 
-    if not token:
-        return None
+        if item.startswith("session="):
+            token = item.split("=", 1)[1]
 
-    session = SESSIONS.get(token)
+            session = sessions.get(token)
 
-    if not session:
-        return None
+            if not session:
+                return None
 
-    if session["expires_at"] <= time.time():
-        SESSIONS.pop(token, None)
-        return None
+            if session["expires"] < time.time():
+                sessions.pop(token, None)
+                return None
 
-    return {
-        "token": token,
-        **session
-    }
+            return {
+                "token": token,
+                **session
+            }
 
-
-def delete_session(token):
-    if token:
-        SESSIONS.pop(token, None)
+    return None
 
 
 def logged_in(handler):
     return get_session(handler) is not None
 
 
-def csrf_valid(handler, form):
+def cookie(name, value, max_age=None, http_only=True):
+    result = f"{name}={value}; Path=/; SameSite=Strict; Secure"
+
+    if http_only:
+        result += "; HttpOnly"
+
+    if max_age is not None:
+        result += f"; Max-Age={max_age}"
+
+    return result
+
+
+def csrf_valid(handler, data):
     session = get_session(handler)
 
     if not session:
         return False
 
-    submitted = form.get("csrf_token", [""])[0]
+    submitted = data.get("csrf", [""])[0]
 
-    cookies = parse_cookies(
-        handler.headers.get("Cookie", "")
-    )
-
-    cookie_token = cookies.get("csrf_token", "")
-    expected = session["csrf_token"]
-
-    if not submitted or not cookie_token:
+    if not submitted:
         return False
 
-    return (
-        hmac.compare_digest(submitted, expected)
-        and
-        hmac.compare_digest(cookie_token, expected)
+    return hmac.compare_digest(
+        submitted,
+        session["csrf"]
     )
 
 
-# =========================================================
+def escape(text):
+    text = str(text)
+
+    replacements = {
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#x27;"
+    }
+
+    for a, b in replacements.items():
+        text = text.replace(a, b)
+
+    return text
+
+
+# =========================
 # Supabase
-# =========================================================
+# =========================
 
-def supabase_request(method, path, data=None, query=None):
-    if not SUPABASE_URL:
-        raise Exception("SUPABASE_URL تنظیم نشده است.")
+def supabase_request(method, path, data=None):
 
-    if not SUPABASE_SECRET_KEY:
-        raise Exception("SUPABASE_SECRET_KEY تنظیم نشده است.")
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise Exception("تنظیمات Supabase در Render کامل نیست.")
 
     url = SUPABASE_URL + path
 
-    if query:
-        url += "?" + query
-
     headers = {
-        "apikey": SUPABASE_SECRET_KEY,
-        "Authorization": "Bearer " + SUPABASE_SECRET_KEY,
+        "apikey": SUPABASE_KEY,
+        "Authorization": "Bearer " + SUPABASE_KEY,
         "Content-Type": "application/json",
         "Prefer": "return=minimal"
     }
@@ -165,10 +146,7 @@ def supabase_request(method, path, data=None, query=None):
     body = None
 
     if data is not None:
-        body = json.dumps(
-            data,
-            ensure_ascii=False
-        ).encode("utf-8")
+        body = json.dumps(data).encode("utf-8")
 
     request = urllib.request.Request(
         url,
@@ -178,47 +156,35 @@ def supabase_request(method, path, data=None, query=None):
     )
 
     try:
+
         with urllib.request.urlopen(
             request,
             timeout=20
         ) as response:
 
-            text = response.read().decode(
-                "utf-8",
-                errors="replace"
-            )
+            result = response.read().decode("utf-8")
 
-            if not text:
+            if not result:
                 return None
 
-            return json.loads(text)
+            return json.loads(result)
 
-    except urllib.error.HTTPError as error:
-        body_text = error.read().decode(
-            "utf-8",
-            errors="replace"
-        )
-
-        print(
-            "SUPABASE ERROR:",
-            error.code,
-            body_text
-        )
-
-        raise Exception(
-            "خطای Supabase: "
-            + str(error.code)
-        )
+    except Exception as e:
+        print("SUPABASE ERROR:", repr(e))
+        raise
 
 
-# =========================================================
-# قالب سایت
-# =========================================================
+# =========================
+# HTML
+# =========================
 
 def page(title, content):
+
     return f"""
 <!DOCTYPE html>
+
 <html lang="fa" dir="rtl">
+
 <head>
 
 <meta charset="UTF-8">
@@ -226,10 +192,9 @@ def page(title, content):
 <meta name="viewport"
 content="width=device-width, initial-scale=1.0">
 
-<meta name="theme-color"
-content="#050816">
+<meta name="theme-color" content="#050816">
 
-<title>{html.escape(title)}</title>
+<title>{escape(title)}</title>
 
 <style>
 
@@ -250,12 +215,12 @@ body {{
 
     background:
         radial-gradient(
-            circle at 15% 20%,
+            circle at 10% 10%,
             rgba(37,99,235,.25),
             transparent 30%
         ),
         radial-gradient(
-            circle at 85% 80%,
+            circle at 90% 90%,
             rgba(124,58,237,.25),
             transparent 30%
         ),
@@ -265,30 +230,32 @@ body {{
             #071127,
             #0f172a
         );
+
+    padding: 25px 0;
 }}
 
 .container {{
     width: 94%;
-    max-width: 1050px;
-    margin: 35px auto;
+    max-width: 900px;
+    margin: auto;
 }}
 
 .card {{
     background:
         linear-gradient(
             145deg,
-            rgba(30,41,59,.95),
-            rgba(15,23,42,.95)
+            rgba(30,41,59,.94),
+            rgba(15,23,42,.96)
         );
 
     border:
         1px solid rgba(255,255,255,.08);
 
-    border-radius: 28px;
+    border-radius: 25px;
 
-    padding: 30px;
+    padding: 28px;
 
-    margin-bottom: 22px;
+    margin-bottom: 20px;
 
     box-shadow:
         0 25px 70px rgba(0,0,0,.35);
@@ -315,12 +282,16 @@ body {{
             #2563eb,
             #7c3aed
         );
+
+    box-shadow:
+        0 15px 35px
+        rgba(37,99,235,.30);
 }}
 
 h1 {{
     text-align: center;
-    margin: 5px 0 12px;
-    font-size: 30px;
+    font-size: 29px;
+    margin: 8px 0;
 }}
 
 h2 {{
@@ -340,22 +311,23 @@ select {{
     width: 100%;
 
     border:
-        1px solid rgba(255,255,255,.09);
+        1px solid
+        rgba(255,255,255,.09);
 
     outline: none;
 
-    border-radius: 16px;
+    border-radius: 15px;
 
-    padding: 15px 17px;
+    padding: 15px;
 
-    font-size: 16px;
+    margin-bottom: 13px;
 
     background:
         rgba(51,65,85,.75);
 
     color: white;
 
-    margin-bottom: 13px;
+    font-size: 16px;
 
     font-family:
         Tahoma,
@@ -382,19 +354,19 @@ select:focus {{
 button {{
     width: 100%;
 
-    border: none;
+    border: 0;
 
-    border-radius: 16px;
+    border-radius: 15px;
 
     padding: 15px;
 
     margin-top: 6px;
 
+    color: white;
+
     font-size: 16px;
 
     font-weight: bold;
-
-    color: white;
 
     cursor: pointer;
 
@@ -404,10 +376,81 @@ button {{
             #2563eb,
             #4f46e5
         );
+
+    transition: .2s;
 }}
 
 button:hover {{
-    filter: brightness(1.08);
+    transform: translateY(-2px);
+}}
+
+.red {{
+    background:
+        linear-gradient(
+            135deg,
+            #dc2626,
+            #991b1b
+        );
+}}
+
+.green {{
+    background:
+        linear-gradient(
+            135deg,
+            #059669,
+            #047857
+        );
+}}
+
+.gray {{
+    background:
+        linear-gradient(
+            135deg,
+            #475569,
+            #334155
+        );
+}}
+
+.menu {{
+    display: grid;
+
+    grid-template-columns:
+        repeat(2, 1fr);
+
+    gap: 15px;
+
+    margin-top: 25px;
+}}
+
+.menu a {{
+    text-decoration: none;
+
+    color: white;
+
+    padding: 25px 15px;
+
+    border-radius: 18px;
+
+    text-align: center;
+
+    background:
+        rgba(51,65,85,.65);
+
+    border:
+        1px solid
+        rgba(255,255,255,.07);
+
+    transition: .2s;
+}}
+
+.menu a:hover {{
+    transform: translateY(-3px);
+    border-color: #3b82f6;
+}}
+
+.menu-icon {{
+    font-size: 32px;
+    margin-bottom: 8px;
 }}
 
 .back {{
@@ -422,52 +465,15 @@ button:hover {{
     margin-top: 18px;
 }}
 
-.features {{
-    display: grid;
-
-    grid-template-columns:
-        repeat(3, 1fr);
-
-    gap: 14px;
-
-    margin-top: 25px;
-}}
-
-.feature {{
-    text-align: center;
-
-    padding: 18px;
-
-    border-radius: 18px;
-
-    background:
-        rgba(51,65,85,.48);
-}}
-
-.feature-icon {{
-    font-size: 28px;
-    margin-bottom: 8px;
-}}
-
-.feature-text {{
-    color: #94a3b8;
-    font-size: 13px;
-    line-height: 1.7;
-}}
-
 .success {{
     padding: 25px;
 
-    border-radius: 20px;
+    border-radius: 18px;
 
     text-align: center;
 
     background:
-        linear-gradient(
-            135deg,
-            rgba(22,101,52,.85),
-            rgba(21,128,61,.55)
-        );
+        rgba(22,101,52,.7);
 }}
 
 .error {{
@@ -478,64 +484,60 @@ button:hover {{
     text-align: center;
 
     background:
-        linear-gradient(
-            135deg,
-            rgba(153,27,27,.85),
-            rgba(127,29,29,.60)
-        );
+        rgba(153,27,27,.75);
 
-    word-break: break-word;
+    margin-bottom: 20px;
 }}
 
 .code {{
-    background:
-        rgba(2,6,23,.75);
+    padding: 15px;
 
-    border:
-        1px solid rgba(96,165,250,.15);
+    margin: 15px 0;
 
     border-radius: 14px;
 
-    padding: 15px;
-
     text-align: center;
+
+    background:
+        rgba(2,6,23,.75);
+
+    color: #bfdbfe;
+
+    font-size: 20px;
 
     font-weight: bold;
 
     letter-spacing: 1px;
+}}
 
-    margin: 15px 0;
+.report {{
+    padding: 20px;
 
-    color: #bfdbfe;
+    margin-bottom: 15px;
+
+    border-radius: 19px;
+
+    background:
+        rgba(51,65,85,.65);
+
+    border:
+        1px solid
+        rgba(255,255,255,.07);
 }}
 
 .badge {{
     display: inline-block;
 
-    padding: 7px 13px;
+    padding: 7px 12px;
 
     border-radius: 999px;
 
     background:
-        rgba(37,99,235,.20);
+        rgba(37,99,235,.2);
 
     color: #bfdbfe;
 
     font-size: 13px;
-}}
-
-.report {{
-    background:
-        rgba(30,41,59,.85);
-
-    border:
-        1px solid rgba(255,255,255,.07);
-
-    border-radius: 20px;
-
-    padding: 20px;
-
-    margin-bottom: 16px;
 }}
 
 .report-text {{
@@ -543,7 +545,7 @@ button:hover {{
 
     line-height: 2;
 
-    margin: 15px 0;
+    margin: 16px 0;
 }}
 
 .date {{
@@ -557,76 +559,39 @@ button:hover {{
     grid-template-columns:
         repeat(3, 1fr);
 
-    gap: 13px;
+    gap: 12px;
 
-    margin-bottom: 22px;
+    margin-bottom: 20px;
 }}
 
 .stat {{
-    background:
-        rgba(51,65,85,.60);
-
-    border-radius: 18px;
-
     padding: 18px;
 
+    border-radius: 17px;
+
     text-align: center;
+
+    background:
+        rgba(51,65,85,.55);
 }}
 
 .stat-number {{
-    font-size: 30px;
-
+    font-size: 28px;
     font-weight: bold;
-
     color: #bfdbfe;
-
-    margin-bottom: 5px;
 }}
 
-.delete {{
-    background:
-        linear-gradient(
-            135deg,
-            #dc2626,
-            #991b1b
-        );
-}}
-
-.status {{
-    background:
-        linear-gradient(
-            135deg,
-            #059669,
-            #047857
-        );
-}}
-
-.logout {{
-    background:
-        linear-gradient(
-            135deg,
-            #475569,
-            #334155
-        );
-}}
-
-@media(max-width:700px) {{
-
-    .container {{
-        width: 92%;
-        margin: 20px auto;
-    }}
+@media(max-width:650px) {{
 
     .card {{
         padding: 20px;
-        border-radius: 22px;
+        border-radius: 21px;
     }}
 
-    h1 {{
-        font-size: 25px;
+    .menu {{
+        grid-template-columns: 1fr;
     }}
 
-    .features,
     .stats {{
         grid-template-columns: 1fr;
     }}
@@ -646,28 +611,30 @@ button:hover {{
 </div>
 
 </body>
+
 </html>
 """
 
 
-# =========================================================
+# =========================
 # صفحات
-# =========================================================
+# =========================
 
 def login_page(message=""):
+
     error = ""
 
     if message:
         error = f"""
 <div class="error">
-{html.escape(message)}
+{escape(message)}
 </div>
-<br>
 """
 
     return page(
         "ورود به سامانه غدیر",
         f"""
+
 <div class="card">
 
 <div class="logo">
@@ -690,13 +657,15 @@ def login_page(message=""):
 type="text"
 name="username"
 placeholder="👤 نام کاربری"
+autocomplete="username"
 required
 >
 
 <input
 type="password"
 name="password"
-placeholder="🔑 رمز عبور"
+placeholder="🔐 رمز عبور"
+autocomplete="current-password"
 required
 >
 
@@ -707,14 +676,17 @@ required
 </form>
 
 </div>
+
 """
     )
 
 
-def home_page(csrf_token):
+def home_page(csrf):
+
     return page(
         "سامانه غدیر",
         f"""
+
 <div class="card">
 
 <div class="logo">
@@ -726,92 +698,66 @@ def home_page(csrf_token):
 </h1>
 
 <div class="subtitle">
-سامانه ثبت و پیگیری گزارش‌ها
+پنل اصلی سامانه ثبت و پیگیری گزارش‌ها
 </div>
 
-<div class="features">
+<div class="menu">
 
-<div class="feature">
-<div class="feature-icon">📝</div>
-<b>ثبت گزارش</b>
-<div class="feature-text">
-گزارش خود را ثبت کنید.
-</div>
-</div>
+<a href="/send">
+<div class="menu-icon">📝</div>
+ثبت گزارش
+</a>
 
-<div class="feature">
-<div class="feature-icon">🔎</div>
-<b>پیگیری</b>
-<div class="feature-text">
-با کد پیگیری وضعیت را ببینید.
-</div>
-</div>
+<a href="/track">
+<div class="menu-icon">🔎</div>
+پیگیری گزارش
+</a>
 
-<div class="feature">
-<div class="feature-icon">📋</div>
-<b>مدیریت</b>
-<div class="feature-text">
-مدیریت گزارش‌های ثبت‌شده.
-</div>
-</div>
+<a href="/reports">
+<div class="menu-icon">📋</div>
+مدیریت گزارش‌ها
+</a>
 
 </div>
-
-<br>
-
-<form method="GET" action="/send">
-<button type="submit">
-📝 ثبت گزارش جدید
-</button>
-</form>
-
-<form method="GET" action="/track">
-<button type="submit">
-🔎 پیگیری گزارش
-</button>
-</form>
-
-<form method="GET" action="/reports">
-<button type="submit">
-📋 پنل گزارش‌ها
-</button>
-</form>
 
 <form method="POST" action="/logout">
 
 <input
 type="hidden"
-name="csrf_token"
-value="{html.escape(csrf_token)}"
+name="csrf"
+value="{escape(csrf)}"
 >
 
 <button
-class="logout"
-type="submit">
+class="gray"
+type="submit"
+>
 🚪 خروج
 </button>
 
 </form>
 
 </div>
+
 """
     )
 
 
 def send_page(message=""):
-    extra = ""
+
+    error = ""
 
     if message:
-        extra = f"""
+        error = f"""
 <div class="error">
-{html.escape(message)}
+{escape(message)}
 </div>
-<br>
 """
 
     return page(
         "ثبت گزارش",
         f"""
+
 <div class="card">
 
 <div class="logo">
@@ -823,12 +769,12 @@ def send_page(message=""):
 </h1>
 
 <div class="subtitle">
-گزارش خود را با دقت وارد کنید.
+متن گزارش را وارد کنید.
 </div>
 
-{extra}
+{error}
 
-<form method="POST" action="/report">
+<form method="POST" action="/submit">
 
 <input
 type="password"
@@ -839,8 +785,8 @@ required
 
 <textarea
 name="report"
+maxlength="{MAX_REPORT_LENGTH}"
 placeholder="✍️ متن گزارش..."
-maxlength="10000"
 required
 ></textarea>
 
@@ -855,14 +801,17 @@ required
 </a>
 
 </div>
+
 """
     )
 
 
 def success_page(code):
+
     return page(
         "گزارش ثبت شد",
         f"""
+
 <div class="card">
 
 <div class="success">
@@ -885,20 +834,18 @@ def success_page(code):
 
 <br><br>
 
-<span style="font-size:22px">
-{html.escape(code)}
-</span>
+{escape(code)}
 
 </div>
 
 <p>
-این کد را برای پیگیری نگه دارید.
+کد پیگیری را برای خودتان نگه دارید.
 </p>
 
 </div>
 
 <a class="back" href="/track">
-🔎 پیگیری
+🔎 پیگیری گزارش
 </a>
 
 <a class="back" href="/">
@@ -906,24 +853,26 @@ def success_page(code):
 </a>
 
 </div>
+
 """
     )
 
 
 def track_page(message=""):
+
     error = ""
 
     if message:
         error = f"""
 <div class="error">
-{html.escape(message)}
+{escape(message)}
 </div>
-<br>
 """
 
     return page(
         "پیگیری گزارش",
         f"""
+
 <div class="card">
 
 <div class="logo">
@@ -945,7 +894,7 @@ def track_page(message=""):
 <input
 type="text"
 name="code"
-placeholder="🎫 GHD-A1B2C3D4"
+placeholder="🎫 مثال: GHD-A1B2C3D4"
 required
 >
 
@@ -960,44 +909,52 @@ required
 </a>
 
 </div>
+
 """
     )
 
 
 def track_result(code):
-    encoded = quote(code, safe="")
 
-    query = (
-        "select=created_at,status,tracking_code"
+    encoded = urllib.parse.quote(
+        code,
+        safe=""
+    )
+
+    path = (
+        "/rest/v1/reports"
+        "?select=created_at,status,tracking_code"
         "&tracking_code=eq."
         + encoded
-        + "&limit=1"
     )
 
     reports = supabase_request(
         "GET",
-        "/rest/v1/reports",
-        query=query
+        path
     )
 
     if not reports:
+
         return track_page(
             "گزارشی با این کد پیدا نشد."
         )
 
     item = reports[0]
 
-    status = str(
-        item.get("status", "جدید")
+    status = item.get(
+        "status",
+        "جدید"
     )
 
-    created = str(
-        item.get("created_at", "")
+    created = item.get(
+        "created_at",
+        ""
     )
 
     return page(
         "نتیجه پیگیری",
         f"""
+
 <div class="card">
 
 <div class="logo">
@@ -1009,27 +966,27 @@ def track_result(code):
 </h1>
 
 <div class="code">
-🎫 کد پیگیری
-<br><br>
-{html.escape(code)}
+
+🎫 {escape(code)}
+
 </div>
 
 <div style="text-align:center">
 
 <div class="badge">
-📌 وضعیت
+وضعیت گزارش
 </div>
 
 <h2>
-{html.escape(status)}
+{escape(status)}
 </h2>
 
-</div>
+<p class="date">
+🕐 زمان ثبت:
+<br>
+{escape(created)}
+</p>
 
-<div class="code">
-🕐 زمان ثبت
-<br><br>
-{html.escape(created)}
 </div>
 
 <a class="back" href="/track">
@@ -1041,43 +998,41 @@ def track_result(code):
 </a>
 
 </div>
+
 """
     )
 
 
-# =========================================================
-# پنل مدیریت
-# =========================================================
+def reports_page(search="", csrf=""):
 
-def reports_page(search, csrf_token):
-    query = (
-        "select=id,created_at,report,tracking_code,status"
+    path = (
+        "/rest/v1/reports"
+        "?select=id,created_at,report,tracking_code,status"
         "&order=created_at.desc"
     )
 
     reports = supabase_request(
         "GET",
-        "/rest/v1/reports",
-        query=query
+        path
     )
 
     search = search.strip().lower()
 
     if search:
+
         reports = [
-            item
-            for item in reports
+            x for x in reports
             if (
                 search in str(
-                    item.get("report", "")
+                    x.get("report", "")
                 ).lower()
                 or
                 search in str(
-                    item.get("tracking_code", "")
+                    x.get("tracking_code", "")
                 ).lower()
                 or
                 search in str(
-                    item.get("status", "")
+                    x.get("status", "")
                 ).lower()
             )
         ]
@@ -1085,29 +1040,29 @@ def reports_page(search, csrf_token):
     total = len(reports)
 
     new_count = sum(
-        1
-        for item in reports
-        if item.get("status", "جدید") == "جدید"
+        1 for x in reports
+        if x.get("status", "جدید") == "جدید"
     )
 
     checking_count = sum(
-        1
-        for item in reports
-        if item.get("status", "") == "در حال بررسی"
+        1 for x in reports
+        if x.get("status", "") == "در حال بررسی"
     )
 
     checked_count = sum(
-        1
-        for item in reports
-        if item.get("status", "") == "بررسی‌شده"
+        1 for x in reports
+        if x.get("status", "") == "بررسی‌شده"
     )
 
-    report_html = ""
+    html_reports = ""
 
     for item in reports:
-        rid = str(item.get("id", ""))
 
-        report_text = str(
+        rid = str(
+            item.get("id", "")
+        )
+
+        text = str(
             item.get("report", "")
         )
 
@@ -1115,7 +1070,7 @@ def reports_page(search, csrf_token):
             item.get("created_at", "")
         )
 
-        tracking = str(
+        code = str(
             item.get("tracking_code", "")
         )
 
@@ -1123,58 +1078,69 @@ def reports_page(search, csrf_token):
             item.get("status", "جدید")
         )
 
-        report_html += f"""
+        html_reports += f"""
+
 <div class="report">
 
 <div class="badge">
-📌 {html.escape(status)}
+📌 {escape(status)}
 </div>
 
 <div class="code">
-🎫 {html.escape(tracking)}
+🎫 {escape(code)}
 </div>
 
 <div class="report-text">
-{html.escape(report_text)}
+{escape(text)}
 </div>
 
 <div class="date">
-🕐 {html.escape(created)}
+🕐 {escape(created)}
 </div>
-
-<br>
 
 <form method="POST" action="/status">
 
 <input
 type="hidden"
-name="id"
-value="{html.escape(rid)}"
+name="csrf"
+value="{escape(csrf)}"
 >
 
 <input
 type="hidden"
-name="csrf_token"
-value="{html.escape(csrf_token)}"
+name="id"
+value="{escape(rid)}"
 >
 
 <select name="status">
 
-<option value="جدید">
+<option
+value="جدید"
+{"selected" if status == "جدید" else ""}
+>
 جدید
 </option>
 
-<option value="در حال بررسی">
+<option
+value="در حال بررسی"
+{"selected" if status == "در حال بررسی" else ""}
+>
 در حال بررسی
 </option>
 
-<option value="بررسی‌شده">
+<option
+value="بررسی‌شده"
+{"selected" if status == "بررسی‌شده" else ""}
+>
 بررسی‌شده
 </option>
 
 </select>
 
-<button class="status" type="submit">
+<button
+class="green"
+type="submit"
+>
 💾 تغییر وضعیت
 </button>
 
@@ -1184,45 +1150,43 @@ value="{html.escape(csrf_token)}"
 
 <input
 type="hidden"
-name="id"
-value="{html.escape(rid)}"
+name="csrf"
+value="{escape(csrf)}"
 >
 
 <input
 type="hidden"
-name="csrf_token"
-value="{html.escape(csrf_token)}"
+name="id"
+value="{escape(rid)}"
 >
 
 <button
-class="delete"
-type="submit">
+class="red"
+type="submit"
+>
 🗑️ حذف گزارش
 </button>
 
 </form>
 
 </div>
+
 """
 
-    if not report_html:
-        report_html = """
-<div class="card" style="text-align:center">
+    if not html_reports:
 
-<div style="font-size:45px">
+        html_reports = """
+<div class="report" style="text-align:center">
 📭
-</div>
-
-<h3>
-گزارشی پیدا نشد
-</h3>
-
+<br><br>
+گزارشی پیدا نشد.
 </div>
 """
 
     return page(
-        "پنل مدیریت",
+        "مدیریت گزارش‌ها",
         f"""
+
 <div class="card">
 
 <div class="logo">
@@ -1230,7 +1194,7 @@ type="submit">
 </div>
 
 <h1>
-پنل مدیریت
+مدیریت گزارش‌ها
 </h1>
 
 <div class="stats">
@@ -1239,14 +1203,14 @@ type="submit">
 <div class="stat-number">
 {total}
 </div>
-کل گزارش‌ها
+کل
 </div>
 
 <div class="stat">
 <div class="stat-number">
 {new_count}
 </div>
-گزارش جدید
+جدید
 </div>
 
 <div class="stat">
@@ -1258,21 +1222,22 @@ type="submit">
 
 </div>
 
-<div class="stat">
+<div class="stat" style="margin-bottom:20px">
+
 <div class="stat-number">
 {checking_count}
 </div>
-در حال بررسی
-</div>
 
-<br>
+در حال بررسی
+
+</div>
 
 <form method="GET" action="/reports">
 
 <input
 type="text"
 name="search"
-value="{html.escape(search)}"
+value="{escape(search)}"
 placeholder="🔎 جست‌وجو..."
 >
 
@@ -1282,43 +1247,30 @@ placeholder="🔎 جست‌وجو..."
 
 </form>
 
-<br>
-
-{report_html}
-
-<form method="POST" action="/logout">
-
-<input
-type="hidden"
-name="csrf_token"
-value="{html.escape(csrf_token)}"
->
-
-<button class="logout" type="submit">
-🚪 خروج
-</button>
-
-</form>
+{html_reports}
 
 <a class="back" href="/">
 🏠 صفحه اصلی
 </a>
 
 </div>
+
 """
     )
 
 
-# =========================================================
-# پاسخ‌های HTTP
-# =========================================================
+# =========================
+# Handler
+# =========================
 
-class Server(BaseHTTPRequestHandler):
+class Handler(BaseHTTPRequestHandler):
 
-    server_version = "GhadeerServer/1.0"
+    def log_message(self, format, *args):
+        return
 
     def send_html(self, content, status=200):
-        data = content.encode("utf-8")
+
+        body = content.encode("utf-8")
 
         self.send_response(status)
 
@@ -1329,7 +1281,7 @@ class Server(BaseHTTPRequestHandler):
 
         self.send_header(
             "Content-Length",
-            str(len(data))
+            str(len(body))
         )
 
         self.send_header(
@@ -1339,9 +1291,10 @@ class Server(BaseHTTPRequestHandler):
 
         self.end_headers()
 
-        self.wfile.write(data)
+        self.wfile.write(body)
 
     def redirect(self, location):
+
         self.send_response(302)
 
         self.send_header(
@@ -1351,12 +1304,38 @@ class Server(BaseHTTPRequestHandler):
 
         self.end_headers()
 
-    # =====================================================
+    def read_post(self):
+
+        length = int(
+            self.headers.get(
+                "Content-Length",
+                "0"
+            )
+        )
+
+        if length > 1024 * 1024:
+            raise Exception(
+                "درخواست بیش از حد مجاز است."
+            )
+
+        body = self.rfile.read(
+            length
+        ).decode(
+            "utf-8",
+            errors="replace"
+        )
+
+        return parse_qs(body)
+
+    # =====================
     # GET
-    # =====================================================
+    # =====================
 
     def do_GET(self):
-        parsed = urlparse(self.path)
+
+        parsed = urlparse(
+            self.path
+        )
 
         path = parsed.path
 
@@ -1366,5 +1345,95 @@ class Server(BaseHTTPRequestHandler):
 
         try:
 
+            # صفحه اصلی
+
             if path == "/":
- 
+
+                session = get_session(self)
+
+                if not session:
+                    self.redirect("/login")
+                    return
+
+                self.send_html(
+                    home_page(
+                        session["csrf"]
+                    )
+                )
+
+                return
+
+            # ورود
+
+            if path == "/login":
+
+                if logged_in(self):
+                    self.redirect("/")
+                    return
+
+                self.send_html(
+                    login_page()
+                )
+
+                return
+
+            # ثبت گزارش
+
+            if path == "/send":
+
+                if not logged_in(self):
+                    self.redirect("/login")
+                    return
+
+                self.send_html(
+                    send_page()
+                )
+
+                return
+
+            # پیگیری
+
+            if path == "/track":
+
+                if not logged_in(self):
+                    self.redirect("/login")
+                    return
+
+                code = params.get(
+                    "code",
+                    [""]
+                )[0].strip()
+
+                if code:
+
+                    self.send_html(
+                        track_result(code)
+                    )
+
+                else:
+
+                    self.send_html(
+                        track_page()
+                    )
+
+                return
+
+            # گزارش‌ها
+
+            if path == "/reports":
+
+                session = get_session(self)
+
+                if not session:
+                    self.redirect("/login")
+                    return
+
+                search = params.get(
+                    "search",
+                    [""]
+                )[0]
+
+                self.send_html(
+                    reports_page(
+                        search,
+           
