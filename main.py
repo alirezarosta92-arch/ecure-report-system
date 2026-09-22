@@ -1,26 +1,1823 @@
 import os
-import json
 import time
 import secrets
 import hmac
-import urllib.request
 import urllib.parse
+import urllib.request
+import json
+import html
+
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+# =========================================================
+# تنظیمات
+# =========================================================
 
 PORT = int(os.getenv("PORT", "10000"))
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
-SUPABASE_KEY = os.getenv("SUPABASE_SECRET_KEY", "")
+SUPABASE_URL = os.getenv(
+    "SUPABASE_URL",
+    ""
+).rstrip("/")
 
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
-REPORT_PASSWORD = os.getenv("REPORT_PASSWORD", "")
+SUPABASE_KEY = os.getenv(
+    "SUPABASE_SECRET_KEY",
+    "")
 
-sessions = {}
-login_attempts = {}
+ADMIN_USERNAME = os.getenv(
+    "ADMIN_USERNAME",
+    "admin"
+)
+
+ADMIN_PASSWORD = os.getenv(
+    "ADMIN_PASSWORD",
+    ""
+)
+
+REPORT_PASSWORD = os.getenv(
+    "REPORT_PASSWORD",
+    ""
+)
+
+SESSION_TTL = 2 * 60 * 60
 
 MAX_REPORT_LENGTH = 10000
-SESSION_TIME = 2 * 60 * 60
 
-# Logo is embedded so the page does not need another server or a new website.
-LOGO_DATA = "/9j/4AAQSkZJRgABAQAAAQABAAD/4gIoSUNDX1BST0ZJTEUAAQEAAAIYAAAAAAQwAABtbnRyUkdCIFhZWiAAAAAAAAAAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAAHRyWFlaAAABZAAAABRnWFlaAAABeAAAABRiWFlaAAABjAAAABRyVFJDAAABoAAAAChnVFJDAAABoAAAAChiVFJDAAABoAAAACh3dHB0AAAByAAAABRjcHJ0AAAB3AAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAFgAAAAcAHMAUgBHAEIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFhZWiAAAAAAAABvogAAOPUAAAOQWFlaIAAAAAAAAGKZAAC3hQAAGNpYWVogAAAAAAAAJKAAAA+EAAC2z3BhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABYWVogAAAAAAAA9tYAAQAAAADTLW1sdWMAAAAAAAAAAQAAAAxlblVTAAAAIAAAABwARwBvAG8AZwBsAGUAIABJAG4AYwAuACAAMgAwADEANv/bAEMAAwICAwICAwMDAwQDAwQFCAUFBAQFCgcHBggMCgwMCwoLCw0OEhANDhEOCwsQFhARExQVFRUMDxcYFhQYEhQVFP/bAEMBAwQEBQQFCQUFCRQNCw0UFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFP/AABEIBgAGAAMBIgACEQEDEQH/xAAeAAEAAgIDAQEBAAAAAAAAAAAACAkGBwMEBQIBCv/EAFYQAAEDBAEDAgMEBwMGCQkHBQABAgMEBQYRBwgSITFBE1FhFCIycQkVI4GRobEWQlIkM2JydMEXJTVDU2NzgtEYNERUZJKTsuEmJzY3RYOi8HWz0vH/xAAcAQEAAQUBAQAAAAAAAAAAAAAABgMEBQcIAgH/xABIEQACAgECBAMECAQFAgQEBwEAAQIDBAURBhIhMRNBUQciYXEUIzKBkaGxwRVC0eEkMzRS8GLxFiU1ciZTksIXNkNUgqKyY//aAAwDAQACEQMRAD8AqqAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA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
+
+# =========================================================
+# حافظه نشست‌ها
+# =========================================================
+
+SESSIONS = {}
+
+LOGIN_ATTEMPTS = {}
+
+
+# =========================================================
+# ابزارها
+# =========================================================
+
+def esc(value):
+    return html.escape(
+        str(value),
+        quote=True
+    )
+
+
+# =========================================================
+# Cookie
+# =========================================================
+
+def get_cookies(handler):
+
+    result = {}
+
+    header = handler.headers.get(
+        "Cookie",
+        ""
+    )
+
+    for part in header.split(";"):
+
+        if "=" not in part:
+            continue
+
+        name, value = part.strip().split(
+            "=",
+            1
+        )
+
+        result[name] = value
+
+    return result
+
+
+# =========================================================
+# Session
+# =========================================================
+
+def create_session():
+
+    token = secrets.token_urlsafe(32)
+
+    csrf = secrets.token_urlsafe(32)
+
+    SESSIONS[token] = {
+
+        "csrf": csrf,
+
+        "expires":
+            time.time() + SESSION_TTL
+    }
+
+    return token, csrf
+
+
+def get_session(handler):
+
+    token = get_cookies(
+        handler
+    ).get(
+        "session"
+    )
+
+    if not token:
+        return None, None
+
+    session = SESSIONS.get(
+        token
+    )
+
+    if not session:
+        return None, None
+
+    if session["expires"] < time.time():
+
+        SESSIONS.pop(
+            token,
+            None
+        )
+
+        return None, None
+
+    return token, session
+
+
+# =========================================================
+# Supabase
+# =========================================================
+
+def supabase(
+    method,
+    path,
+    data=None
+):
+
+    if not SUPABASE_URL:
+
+        raise RuntimeError(
+            "SUPABASE_URL تنظیم نشده است."
+        )
+
+    if not SUPABASE_KEY:
+
+        raise RuntimeError(
+            "SUPABASE_SECRET_KEY تنظیم نشده است."
+        )
+
+    body = None
+
+    if data is not None:
+
+        body = json.dumps(
+            data
+        ).encode(
+            "utf-8"
+        )
+
+    request = urllib.request.Request(
+
+        SUPABASE_URL + path,
+
+        data=body,
+
+        method=method,
+
+        headers={
+
+            "apikey":
+                SUPABASE_KEY,
+
+            "Authorization":
+                "Bearer " + SUPABASE_KEY,
+
+            "Content-Type":
+                "application/json",
+
+            "Prefer":
+                "return=representation"
+        }
+    )
+
+    with urllib.request.urlopen(
+        request,
+        timeout=15
+    ) as response:
+
+        raw = response.read().decode(
+            "utf-8"
+        )
+
+        if not raw:
+            return []
+
+        return json.loads(
+            raw
+        )
+
+
+# =========================================================
+# قالب سایت
+# =========================================================
+
+def page(
+    title,
+    content
+):
+
+    return f"""
+<!doctype html>
+
+<html
+lang="fa"
+dir="rtl"
+>
+
+<head>
+
+<meta charset="utf-8">
+
+<meta
+name="viewport"
+content="width=device-width,initial-scale=1"
+>
+
+<title>
+{esc(title)}
+|
+سامانه غدیر
+</title>
+
+<style>
+
+* {{
+    box-sizing: border-box;
+}}
+
+body {{
+
+    margin: 0;
+
+    min-height: 100vh;
+
+    font-family:
+        Tahoma,
+        Arial,
+        sans-serif;
+
+    color: #f5f7fb;
+
+    background:
+
+        radial-gradient(
+            circle at 15% 10%,
+            #17315e 0,
+            transparent 35%
+        ),
+
+        radial-gradient(
+            circle at 90% 90%,
+            #3a185c 0,
+            transparent 35%
+        ),
+
+        #070b14;
+}}
+
+
+a {{
+    text-decoration: none;
+    color: inherit;
+}}
+
+
+.wrap {{
+
+    width: min(
+        94%,
+        900px
+    );
+
+    margin: auto;
+
+    padding:
+        22px 0 40px;
+}}
+
+
+/* =========================
+   نوار بالا
+========================= */
+
+.top {{
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content:
+        space-between;
+
+    padding:
+        12px 16px;
+
+    margin-bottom:
+        18px;
+
+    border:
+        1px solid #26334b;
+
+    background:
+        #0d1422cc;
+
+    border-radius:
+        20px;
+
+    backdrop-filter:
+        blur(12px);
+}}
+
+
+.brand {{
+
+    display: flex;
+
+    gap: 11px;
+
+    align-items:
+        center;
+
+    font-weight:
+        bold;
+}}
+
+
+.brand i {{
+
+    width: 42px;
+
+    height: 42px;
+
+    display: grid;
+
+    place-items:
+        center;
+
+    border-radius:
+        13px;
+
+    background:
+        linear-gradient(
+            135deg,
+            #2563eb,
+            #7c3aed
+        );
+
+    font-style:
+        normal;
+
+    font-size:
+        22px;
+}}
+
+
+.online {{
+
+    font-size:
+        11px;
+
+    color:
+        #7ee7aa;
+}}
+
+
+/* =========================
+   کارت
+========================= */
+
+.card {{
+
+    background:
+        #0d1422e8;
+
+    border:
+        1px solid #25324a;
+
+    border-radius:
+        25px;
+
+    padding:
+        25px;
+
+    margin-bottom:
+        16px;
+
+    box-shadow:
+        0 20px 60px #0007;
+}}
+
+
+/* =========================
+   ورود
+========================= */
+
+.login {{
+
+    max-width:
+        500px;
+
+    margin:
+        7vh auto;
+}}
+
+
+/* =========================
+   متن
+========================= */
+
+h1 {{
+
+    font-size:
+        30px;
+
+    margin:
+        8px 0;
+}}
+
+
+h2 {{
+
+    margin-top:
+        0;
+}}
+
+
+p {{
+
+    line-height:
+        1.9;
+
+    color:
+        #aab6c9;
+}}
+
+
+/* =========================
+   فرم
+========================= */
+
+label {{
+
+    display:
+        block;
+
+    margin:
+        13px 0 7px;
+
+    color:
+        #dce5f4;
+
+    font-weight:
+        bold;
+}}
+
+
+input,
+textarea,
+select {{
+
+    width:
+        100%;
+
+    padding:
+        14px 15px;
+
+    border-radius:
+        14px;
+
+    border:
+        1px solid #2a3850;
+
+    background:
+        #111a2a;
+
+    color:
+        white;
+
+    outline:
+        0;
+
+    font:
+        inherit;
+}}
+
+
+input:focus,
+textarea:focus,
+select:focus {{
+
+    border-color:
+        #4f8cff;
+
+    box-shadow:
+        0 0 0 3px
+        #3b82f622;
+}}
+
+
+textarea {{
+
+    min-height:
+        190px;
+
+    resize:
+        vertical;
+
+    line-height:
+        1.8;
+}}
+
+
+/* =========================
+   دکمه
+========================= */
+
+button,
+.btn {{
+
+    display:
+        block;
+
+    width:
+        100%;
+
+    border:
+        0;
+
+    border-radius:
+        14px;
+
+    padding:
+        14px;
+
+    margin-top:
+        10px;
+
+    text-align:
+        center;
+
+    font-weight:
+        bold;
+
+    font-size:
+        15px;
+
+    color:
+        white;
+
+    background:
+        linear-gradient(
+            135deg,
+            #2563eb,
+            #7c3aed
+        );
+
+    cursor:
+        pointer;
+}}
+
+
+.dark {{
+
+    background:
+        #172033;
+
+    border:
+        1px solid #2b3951;
+}}
+
+
+.danger {{
+
+    background:
+        linear-gradient(
+            135deg,
+            #b42323,
+            #7f1d1d
+        );
+}}
+
+
+/* =========================
+   گزینه‌های داشبورد
+========================= */
+
+.grid {{
+
+    display:
+        grid;
+
+    grid-template-columns:
+        repeat(3, 1fr);
+
+    gap:
+        12px;
+}}
+
+
+.action {{
+
+    padding:
+        22px;
+
+    border-radius:
+        20px;
+
+    background:
+        #111a2a;
+
+    border:
+        1px solid #263650;
+
+    transition:
+        .2s;
+}}
+
+
+.action:hover {{
+
+    transform:
+        translateY(-3px);
+
+    border-color:
+        #5277bd;
+}}
+
+
+.icon {{
+
+    font-size:
+        30px;
+}}
+
+
+.title {{
+
+    font-weight:
+        bold;
+
+    margin-top:
+        10px;
+}}
+
+
+.small {{
+
+    font-size:
+        12px;
+
+    color:
+        #8998ad;
+}}
+
+
+/* =========================
+   مرکز
+========================= */
+
+.center {{
+
+    text-align:
+        center;
+}}
+
+
+/* =========================
+   کد پیگیری
+========================= */
+
+.code {{
+
+    direction:
+        ltr;
+
+    text-align:
+        center;
+
+    font-weight:
+        bold;
+
+    letter-spacing:
+        2px;
+
+    color:
+        #ffd75a;
+
+    background:
+        #070b12;
+
+    border:
+        1px dashed #80691e;
+
+    border-radius:
+        14px;
+
+    padding:
+        15px;
+
+    margin:
+        14px 0;
+
+    font-size:
+        21px;
+}}
+
+
+/* =========================
+   وضعیت
+========================= */
+
+.status {{
+
+    display:
+        inline-block;
+
+    padding:
+        7px 12px;
+
+    border-radius:
+        99px;
+
+    background:
+        #17335e;
+
+    color:
+        #a9c9ff;
+
+    font-size:
+        12px;
+}}
+
+
+/* =========================
+   گزارش
+========================= */
+
+.report {{
+
+    white-space:
+        pre-wrap;
+
+    line-height:
+        2;
+
+    background:
+        #080d16;
+
+    border:
+        1px solid #202c40;
+
+    padding:
+        16px;
+
+    border-radius:
+        15px;
+
+    margin-top:
+        12px;
+}}
+
+
+/* =========================
+   پیام‌ها
+========================= */
+
+.ok,
+.err {{
+
+    padding:
+        13px;
+
+    border-radius:
+        14px;
+
+    margin-bottom:
+        12px;
+}}
+
+
+.ok {{
+
+    background:
+        #123a26;
+
+    border:
+        1px solid #246b42;
+}}
+
+
+.err {{
+
+    background:
+        #3a171b;
+
+    border:
+        1px solid #743038;
+}}
+
+
+/* =========================
+   آمار
+========================= */
+
+.stats {{
+
+    display:
+        grid;
+
+    grid-template-columns:
+        repeat(3, 1fr);
+
+    gap:
+        10px;
+
+    margin-bottom:
+        15px;
+}}
+
+
+.stat {{
+
+    background:
+        #111a2a;
+
+    border:
+        1px solid #263650;
+
+    border-radius:
+        16px;
+
+    padding:
+        15px;
+
+    text-align:
+        center;
+}}
+
+
+.num {{
+
+    font-size:
+        26px;
+
+    font-weight:
+        bold;
+
+    color:
+        #b9d2ff;
+}}
+
+
+/* =========================
+   موبایل
+========================= */
+
+@media(
+    max-width:650px
+) {{
+
+    .grid,
+    .stats {{
+
+        grid-template-columns:
+            1fr;
+    }}
+
+    .card {{
+
+        padding:
+            19px;
+    }}
+
+    h1 {{
+
+        font-size:
+            25px;
+    }}
+
+    .top {{
+
+        border-radius:
+            16px;
+    }}
+}}
+
+</style>
+
+</head>
+
+
+<body>
+
+<div class="wrap">
+
+
+<div class="top">
+
+<div class="brand">
+
+<i>
+🛡️
+</i>
+
+<div>
+
+سامانه غدیر
+
+<br>
+
+<span class="small">
+ثبت و پیگیری گزارش
+</span>
+
+</div>
+
+</div>
+
+
+<span class="online">
+● آنلاین
+</span>
+
+</div>
+
+
+{content}
+
+
+</div>
+
+</body>
+
+</html>
+"""
+
+
+# =========================================================
+# ارسال HTML
+# =========================================================
+
+def send_html(
+    handler,
+    body,
+    status=200
+):
+
+    data = body.encode(
+        "utf-8"
+    )
+
+    handler.send_response(
+        status
+    )
+
+    handler.send_header(
+        "Content-Type",
+        "text/html; charset=utf-8"
+    )
+
+    handler.send_header(
+        "Content-Length",
+        str(len(data))
+    )
+
+    handler.send_header(
+        "Cache-Control",
+        "no-store"
+    )
+
+    handler.send_header(
+        "X-Content-Type-Options",
+        "nosniff"
+    )
+
+    handler.send_header(
+        "X-Frame-Options",
+        "DENY"
+    )
+
+    handler.send_header(
+        "Referrer-Policy",
+        "no-referrer"
+    )
+
+    handler.send_header(
+        "Content-Security-Policy",
+        "default-src 'self'; "
+        "style-src 'unsafe-inline'; "
+        "form-action 'self'; "
+        "frame-ancestors 'none'"
+    )
+
+    handler.end_headers()
+
+    handler.wfile.write(
+        data
+    )
+
+
+# =========================================================
+# صفحه ورود
+# =========================================================
+
+def login_page(
+    error=""
+):
+
+    error_html = ""
+
+    if error:
+
+        error_html = f"""
+<div class="err">
+{esc(error)}
+</div>
+"""
+
+
+    return page(
+
+        "ورود",
+
+        f"""
+
+<div class="card login center">
+
+<div
+style="font-size:54px"
+>
+🛡️
+</div>
+
+
+<h1>
+ورود به سامانه غدیر
+</h1>
+
+
+<p>
+برای ورود، نام کاربری و گذرواژه
+خود را وارد کنید.
+</p>
+
+
+{error_html}
+
+
+<form
+method="post"
+action="/login"
+>
+
+
+<label>
+نام کاربری
+</label>
+
+
+<input
+name="username"
+autocomplete="username"
+required
+placeholder="نام کاربری"
+>
+
+
+<label>
+گذرواژه
+</label>
+
+
+<input
+type="password"
+name="password"
+autocomplete="current-password"
+required
+placeholder="گذرواژه"
+>
+
+
+<button
+type="submit"
+>
+🔐 ورود به سامانه
+</button>
+
+
+</form>
+
+</div>
+
+"""
+    )
+
+
+# =========================================================
+# داشبورد
+# =========================================================
+
+def dashboard():
+
+    return page(
+
+        "داشبورد",
+
+        """
+
+<div class="card center">
+
+<h2>
+خوش آمدید 👋
+</h2>
+
+
+<p>
+از بخش موردنظر خود استفاده کنید.
+</p>
+
+
+<div class="grid">
+
+
+<a
+class="action"
+href="/report"
+>
+
+<div class="icon">
+📝
+</div>
+
+<div class="title">
+ثبت گزارش
+</div>
+
+<div class="small">
+ارسال گزارش جدید
+</div>
+
+</a>
+
+
+<a
+class="action"
+href="/track"
+>
+
+<div class="icon">
+🔎
+</div>
+
+<div class="title">
+پیگیری گزارش
+</div>
+
+<div class="small">
+پیگیری با کد
+</div>
+
+</a>
+
+
+<a
+class="action"
+href="/reports"
+>
+
+<div class="icon">
+📋
+</div>
+
+<div class="title">
+مدیریت گزارش‌ها
+</div>
+
+<div class="small">
+مشاهده و مدیریت
+</div>
+
+</a>
+
+
+</div>
+
+
+<a
+class="btn dark"
+href="/logout"
+>
+
+🚪 خروج
+
+</a>
+
+</div>
+
+"""
+    )
+
+
+# =========================================================
+# صفحه ثبت گزارش
+# =========================================================
+
+def report_page(
+    error=""
+):
+
+    error_html = ""
+
+    if error:
+
+        error_html = f"""
+<div class="err">
+{esc(error)}
+</div>
+"""
+
+
+    return page(
+
+        "ثبت گزارش",
+
+        f"""
+
+<div class="card">
+
+<h2>
+📝 ثبت گزارش جدید
+</h2>
+
+
+<p>
+گزارش را وارد کنید و پس از ثبت،
+کد پیگیری دریافت می‌کنید.
+</p>
+
+
+{error_html}
+
+
+<form
+method="post"
+action="/submit"
+>
+
+
+<label>
+متن گزارش
+</label>
+
+
+<textarea
+name="report"
+maxlength="10000"
+required
+placeholder="متن گزارش را اینجا وارد کنید..."
+></textarea>
+
+
+<label>
+رمز ثبت گزارش
+</label>
+
+
+<input
+type="password"
+name="password"
+required
+placeholder="رمز ثبت گزارش"
+>
+
+
+<button
+type="submit"
+>
+🚀 ثبت گزارش
+</button>
+
+
+<a
+class="btn dark"
+href="/"
+>
+بازگشت
+</a>
+
+
+</form>
+
+</div>
+
+"""
+    )
+
+
+# =========================================================
+# صفحه پیگیری
+# =========================================================
+
+def track_page(
+    error=""
+):
+
+    error_html = ""
+
+    if error:
+
+        error_html = f"""
+<div class="err">
+{esc(error)}
+</div>
+"""
+
+
+    return page(
+
+        "پیگیری",
+
+        f"""
+
+<div class="card">
+
+<h2>
+🔎 پیگیری گزارش
+</h2>
+
+
+<p>
+کد پیگیری خود را وارد کنید.
+</p>
+
+
+{error_html}
+
+
+<form
+method="get"
+action="/track"
+>
+
+
+<label>
+کد پیگیری
+</label>
+
+
+<input
+name="code"
+required
+placeholder="GHD-XXXXXXXXXX"
+>
+
+
+<button
+type="submit"
+>
+🔎 پیگیری
+</button>
+
+
+<a
+class="btn dark"
+href="/"
+>
+بازگشت
+</a>
+
+
+</form>
+
+</div>
+
+"""
+    )
+
+
+# =========================================================
+# پیدا کردن گزارش
+# =========================================================
+
+def find_report(
+    code
+):
+
+    encoded = urllib.parse.quote(
+        code,
+        safe=""
+    )
+
+    rows = supabase(
+
+        "GET",
+
+        "/rest/v1/reports"
+        "?tracking_code=eq."
+        + encoded
+        + "&select=*"
+    )
+
+    if rows:
+
+        return rows[0]
+
+    return None
+
+
+# =========================================================
+# صفحه مدیریت گزارش‌ها
+# =========================================================
+
+def reports_page(
+    handler
+):
+
+    token, session = get_session(
+        handler
+    )
+
+    if not session:
+
+        return login_page(
+            "ابتدا وارد سامانه شوید."
+        )
+
+
+    rows = supabase(
+
+        "GET",
+
+        "/rest/v1/reports"
+        "?select=*"
+        "&order=id.desc"
+    )
+
+
+    new_count = sum(
+
+        1
+
+        for row in rows
+
+        if row.get(
+            "status",
+            "جدید"
+        ) == "جدید"
+    )
+
+
+    checking_count = sum(
+
+        1
+
+        for row in rows
+
+        if row.get(
+            "status",
+            ""
+        ) == "در حال بررسی"
+    )
+
+
+    done_count = sum(
+
+        1
+
+        for row in rows
+
+        if row.get(
+            "status",
+            ""
+        ) in {
+            "بررسی شد",
+            "بررسی‌شده",
+            "بسته شد"
+        }
+    )
+
+
+    cards = ""
+
+
+    for row in rows:
+
+        report_id = esc(
+            row.get(
+                "id",
+                ""
+            )
+        )
+
+
+        code = esc(
+            row.get(
+                "tracking_code",
+                ""
+            )
+        )
+
+
+        status = esc(
+            row.get(
+                "status",
+                "جدید"
+            )
+        )
+
+
+        text = esc(
+            row.get(
+                "report",
+                ""
+            )
+        )
+
+
+        created = esc(
+            row.get(
+                "created_at",
+                ""
+            )
+        )
+
+
+        csrf = esc(
+            session["csrf"]
+        )
+
+
+        cards += f"""
+
+<div class="card">
+
+
+<span class="status">
+وضعیت: {status}
+</span>
+
+
+<div class="code">
+{code}
+</div>
+
+
+<div class="small">
+زمان ثبت: {created}
+</div>
+
+
+<div class="report">
+{text}
+</div>
+
+
+<form
+method="post"
+action="/status"
+>
+
+
+<input
+type="hidden"
+name="csrf"
+value="{csrf}"
+>
+
+
+<input
+type="hidden"
+name="id"
+value="{report_id}"
+>
+
+
+<label>
+وضعیت جدید
+</label>
+
+
+<select
+name="status"
+>
+
+<option>
+جدید
+</option>
+
+<option>
+در حال بررسی
+</option>
+
+<option>
+بررسی شد
+</option>
+
+<option>
+بسته شد
+</option>
+
+</select>
+
+
+<button
+type="submit"
+>
+💾 ذخیره وضعیت
+</button>
+
+
+</form>
+
+
+<form
+method="post"
+action="/delete"
+>
+
+
+<input
+type="hidden"
+name="csrf"
+value="{csrf}"
+>
+
+
+<input
+type="hidden"
+name="id"
+value="{report_id}"
+>
+
+
+<button
+class="danger"
+type="submit"
+>
+🗑️ حذف گزارش
+</button>
+
+
+</form>
+
+
+</div>
+
+"""
+
+
+    if not cards:
+
+        cards = """
+
+<div class="card center">
+
+<h2>
+📭
+</h2>
+
+<p>
+هنوز گزارشی ثبت نشده است.
+</p>
+
+</div>
+
+"""
+
+
+    return page(
+
+        "مدیریت گزارش‌ها",
+
+        f"""
+
+<div class="stats">
+
+
+<div class="stat">
+
+<div class="num">
+{len(rows)}
+</div>
+
+کل گزارش‌ها
+
+</div>
+
+
+<div class="stat">
+
+<div class="num">
+{new_count}
+</div>
+
+گزارش جدید
+
+</div>
+
+
+<div class="stat">
+
+<div class="num">
+{checking_count + done_count}
+</div>
+
+بررسی‌شده
+
+</div>
+
+
+</div>
+
+
+{cards}
+
+
+<div class="card">
+
+<a
+class="btn dark"
+href="/"
+>
+🏠 داشبورد
+</a>
+
+</div>
+
+"""
+    )
+
+
+# =========================================================
+# Handler
+# =========================================================
+
+class Handler(
+    BaseHTTPRequestHandler
+):
+
+
+    # =====================================================
+    # خواندن POST
+    # =====================================================
+
+    def read_form(self):
+
+        length = int(
+            self.headers.get(
+                "Content-Length",
+                "0"
+            )
+        )
+
+
+        if length > 15000:
+
+            return {}
+
+
+        body = self.rfile.read(
+            length
+        ).decode(
+            "utf-8",
+            errors="replace"
+        )
+
+
+        return urllib.parse.parse_qs(
+            body,
+            keep_blank_values=True
+        )
+
+
+    # =====================================================
+    # Redirect
+    # =====================================================
+
+    def redirect(
+        self,
+        path,
+        cookie=None
+    ):
+
+        self.send_response(
+            303
+        )
+
+        self.send_header(
+            "Location",
+            path
+        )
+
+        self.send_header(
+            "Cache-Con
